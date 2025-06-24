@@ -1,0 +1,9 @@
+[tracker]
+enable=1
+tracker-width=1280
+tracker-height=720
+ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvdcf.so
+ll-config-file=./config_tracker_NvDCF_perf.yml
+gpu-id=0
+enable-batch-process=1
+display-tracking-id=1

@@ -1,0 +1,25 @@
+# Ignore build directories
+/build/
+dist/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore Python virtual envs and caches
+__pycache__/
+*.pyc
+env/
+venv/
+
+# Ignore log files
+*.log
+
+# Ignore local config files
+config.yml
+
+# Large files
+*.zip
+*.gz
+*.tar
+*.pth

@@ -1,0 +1,20 @@
+[property]
+gpu-id=0
+custom-lib-path=/home/mrt/src/demo/deepstream_detr_app/build/libnvds_infercustomparser_detr.so
+parse-bbox-func-name=NvDsInferParseCustomDETR
+labelfile-path=labels_coco.txt
+model-engine-file=detr.engine
+batch-size=1
+network-type=0
+# CORRECT FORMAT (remove comment after the value)
+infer-dims=3;720;1280
+net-scale-factor=0.0039215697906911373
+offsets=0.485;0.456;0.406
+model-color-format=0
+num-detected-classes=91
+interval=0
+gie-unique-id=1
+force-implicit-batch-dim=1
+
+[class-attrs-all]
+pre-cluster-threshold=0.4
