@@ -1,16 +1,23 @@
 /*
    Folder structure:
-   deepstream_detr_app/
+   deepstream-app/
+   ├── build
+   ├── build_and_run.sh
    ├── CMakeLists.txt
+   ├── config_infer_primary_detr.txt
+   ├── config_tracker_NvDCF_perf.yml
+   ├── detr.engine
+   ├── detr.onnx
+   ├── export_detr_onnx.py
+   ├── includes
+   ├── labels_coco.txt
    ├── main.cpp
    ├── nvdsinfer_customparser_detr.cpp
-   ├── labels_coco.txt
-   ├── config_infer_primary_detr.txt
-   └── export_detr_onnx.py
-
+   └── tracker_config.txt
 
 pipeline:
 uridecodebin → nvstreammux → nvinfer (DETR) → nvtracker → nvvideoconvert → nvdsosd → nveglglessink
+
 run:
 ./build/deepstream_detr_app file:///home/mrt/src/ByteTrack/videos/
 
@@ -94,9 +101,14 @@ int main(int argc, char *argv[]) {
         std::cerr << "Usage: " << argv[0] << " <uri>" << std::endl;
         return -1;
     }
-
+    
+	/* Initializes the GStreamer library
+    */
     gst_init(&argc, &argv);
 
+	/* Element factory 
+    Elements: source, streammux, pgie, tracker, nvvidconv, nvosd and sink 
+    */
     GstElement *pipeline = gst_pipeline_new("deepstream-pipeline");
     GstElement *source = gst_element_factory_make("uridecodebin", "src");
     GstElement *streammux = gst_element_factory_make("nvstreammux", "mux");
@@ -111,6 +123,8 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+	/* GObject Property sitter 
+	*/
     g_object_set(G_OBJECT(source), "uri", argv[1], NULL);
     g_object_set(G_OBJECT(pgie), "config-file-path", PGIE_CONFIG_FILE, NULL);
     g_object_set(G_OBJECT(tracker),
@@ -124,32 +138,47 @@ int main(int argc, char *argv[]) {
     g_object_set(G_OBJECT(streammux), "width", 1280, "height", 720, "batch-size", 1, "batched-push-timeout", 40000, NULL);
     g_object_set(G_OBJECT(sink), "sync", FALSE, NULL);
 
+	/* Add multiple elements into a GstBin at once
+    */
     gst_bin_add_many(GST_BIN(pipeline), source, streammux, pgie, tracker, nvvidconv, nvosd, sink, NULL);
 
-    //GstPad *mux_sink_pad = gst_element_get_request_pad(streammux, "sink_0");
-    //if (!mux_sink_pad) {
-    //    std::cerr << "Failed to get request pad from streammux" << std::endl;
-    //    return -1;
-    //}
-
+	/* Hanble dynamic pads
+    */
     g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), streammux);
 
+	/* Attempts to link each element’s src pad to the next element’s sink pad in order
+    streammux → pgie → tracker → nvvidconv → nvosd → sink
+    Pads must exist already.
+    Elements wth static pads, src and sink pads exist after creation.
+    Elements with dynamic pads, src and sink pads must be created first. 
+    */
     if (!gst_element_link_many(streammux, pgie, tracker, nvvidconv, nvosd, sink, NULL)) {
         std::cerr << "Elements could not be linked." << std::endl;
         return -1;
     }
 
+	/* Adding a probe to a GStreamer pad to inspect or modify buffers, Examples:
+    Getting the NvDsBatchMeta (DeepStream metadata)
+    Drawing on frames
+    Logging statistics
+    */
     GstPad *osd_sink_pad = gst_element_get_static_pad(nvosd, "sink");
     gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER, osd_sink_pad_buffer_probe, NULL, NULL);
     gst_object_unref(osd_sink_pad);
 
+	/* set your pipeline to PLAYING state.
+    */
     gst_element_set_state(pipeline, GST_STATE_PLAYING);
     std::cout << "Running DeepStream pipeline..." << std::endl;
 
+	/* The GstBus is where the pipeline posts messages
+    gst_bus_timed_pop_filtered blocks forever (GST_CLOCK_TIME_NONE) until:
+    An ERROR message arrives
+    An EOS (end-of-stream) message arrives
+    */
     GstBus *bus = gst_element_get_bus(pipeline);
     GstMessage *msg = gst_bus_timed_pop_filtered(bus, GST_CLOCK_TIME_NONE,
                                                  (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
-
     if (msg != NULL) {
         GError *err;
         gchar *debug_info;
@@ -170,9 +199,11 @@ int main(int argc, char *argv[]) {
         gst_message_unref(msg);
     }
 
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    gst_object_unref(pipeline);
-    gst_object_unref(bus);
+    /* shutdown sequence
+    */
+    gst_element_set_state(pipeline, GST_STATE_NULL); // stop the pipeline
+    gst_object_unref(pipeline); // free pipeline
+    gst_object_unref(bus); // free bus
 
     return 0;
 }

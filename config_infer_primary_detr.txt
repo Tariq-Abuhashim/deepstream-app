@@ -1,6 +1,6 @@
 [property]
 gpu-id=0
-custom-lib-path=/home/mrt/src/demo/deepstream_detr_app/build/libnvds_infercustomparser_detr.so
+custom-lib-path=/home/mrt/dev/deepstream-app/build/libnvds_infercustomparser_detr.so
 parse-bbox-func-name=NvDsInferParseCustomDETR
 labelfile-path=labels_coco.txt
 model-engine-file=detr.engine

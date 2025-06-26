@@ -1,6 +1,6 @@
 #!/bin/bash
 DS_PATH="/opt/nvidia/deepstream/deepstream-6.0"
-APP_NAME=deepstream_detr_app
+APP_NAME=deepstream_app
 
 function build() {
   echo "[INFO] Building..."

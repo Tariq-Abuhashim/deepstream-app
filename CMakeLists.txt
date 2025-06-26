@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(deepstream_detr_app)
+project(deepstream_app)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
@@ -44,8 +44,8 @@ target_include_directories(nvds_infercustomparser_detr PRIVATE
 target_link_libraries(nvds_infercustomparser_detr nvds_infer)
 
 # Main application
-add_executable(deepstream_detr_app main.cpp)
-target_link_libraries(deepstream_detr_app
+add_executable(deepstream_app main.cpp)
+target_link_libraries(deepstream_app
     nvds_infercustomparser_detr
     nvdsgst_meta
     nvds_meta
@@ -61,7 +61,7 @@ target_link_libraries(deepstream_detr_app
 )
 
 # Install rules (optional)
-install(TARGETS deepstream_detr_app DESTINATION bin)
+install(TARGETS deepstream_app DESTINATION bin)
 
 #sudo apt-get install libgstrtspserver-1.0-dev
 
