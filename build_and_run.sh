@@ -1,6 +1,9 @@
 #!/bin/bash
 DS_PATH="/opt/nvidia/deepstream/deepstream-6.0"
-APP_NAME=deepstream_app
+APP_NAME=deepstream-app
+
+#Usage: ./build_and_run.sh --build
+#       ./build_and_run.sh --run file://$(pwd)/videos/palace.mp4
 
 function build() {
   echo "[INFO] Building..."
@@ -11,7 +14,7 @@ function build() {
 }
 
 function run() {
-  INPUT=${1:-"file:///path/to/your/video.mp4"}
+  INPUT=${1:-"file://$(pwd)/videos/palace.mp4"}
   echo "[INFO] Running on $INPUT"
 
   GST_PLUGIN_PATH=$DS_PATH/lib \

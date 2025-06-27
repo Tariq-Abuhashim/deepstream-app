@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(deepstream_app)
+project(deepstream-app)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
@@ -40,8 +40,8 @@ target_include_directories(nvds_infercustomparser_detr PRIVATE
 target_link_libraries(nvds_infercustomparser_detr DeepStream::nvds_infer)
 
 # Main application
-add_executable(deepstream_app main.cpp)
-target_link_libraries(deepstream_app
+add_executable(deepstream-app main.cpp)
+target_link_libraries(deepstream-app
     nvds_infercustomparser_detr
     DeepStream::nvdsgst_meta
     DeepStream::nvds_meta
@@ -56,5 +56,5 @@ target_link_libraries(deepstream_app
 )
 
 # Install rule (optional)
-install(TARGETS deepstream_app DESTINATION bin)
+install(TARGETS deepstream-app DESTINATION bin)
 
