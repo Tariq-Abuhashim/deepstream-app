@@ -28,7 +28,8 @@ $ make
 This example is using DETR model `facebook/detr-resnet-50`.  
 ```
 $ python3 export_detr_onnx.py
-$ trtexec --onnx=detr.onnx --saveEngine=detr.engine --fp16
+$ python3 -m onnxsim detr.onnx simplified_detr.onnx --no-large-tensor
+$ trtexec --onnx=simplified_detr.onnx --saveEngine=detr.engine --fp16
 
 ```
 
