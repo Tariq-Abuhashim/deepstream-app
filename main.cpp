@@ -54,18 +54,23 @@ static GstPadProbeReturn osd_sink_pad_buffer_probe(GstPad *pad, GstPadProbeInfo 
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)(l_frame->data);
         int person_count = 0;
         int vehicle_count = 0;
+        int total_objs = 0;
         for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
             NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)(l_obj->data);
             if (obj_meta->class_id == 0) person_count++;
             if (obj_meta->class_id == 2) vehicle_count++;
-            std::cout << "Object ID: "   << obj_meta->object_id 
-                      << " Class ID: "   << obj_meta->class_id 
-                      << " Confidence: " << obj_meta->confidence 
+            std::cout << "[PROBE] Frame " << frame_meta->frame_num
+                      << " src_id=" << frame_meta->source_id
+                      << " objID=" << obj_meta->object_id
+                      << " class=" << obj_meta->class_id
+                      << " conf=" << obj_meta->confidence
+                      << " bbox=(" << obj_meta->rect_params.left << "," << obj_meta->rect_params.top
+                      << "," << obj_meta->rect_params.width << "x" << obj_meta->rect_params.height << ")"
                       << std::endl;
         }
-        std::cout << "Frame " << frame_meta->frame_num
-                  << " | Persons: " << person_count
-                  << " | Vehicles: " << vehicle_count << std::endl;
+        std::cout << "[PROBE] Frame " << frame_meta->frame_num 
+        		<< " total_objs=" << total_objs 
+        		<< std::endl;
     }
     return GST_PAD_PROBE_OK;
 }
@@ -117,7 +122,6 @@ int main(int argc, char *argv[]) {
     GstElement *nvvidconv = gst_element_factory_make("nvvideoconvert", "convert");
     GstElement *nvosd = gst_element_factory_make("nvdsosd", "osd");
     GstElement *sink = gst_element_factory_make("nveglglessink", "sink");
-
     if (!pipeline || !source || !streammux || !pgie || !tracker || !nvvidconv || !nvosd || !sink) {
         std::cerr << "One element could not be created. Exiting." << std::endl;
         return -1;
@@ -135,7 +139,8 @@ int main(int argc, char *argv[]) {
              "enable-batch-process", TRUE,
              "gpu-id", 0,
              NULL);
-    g_object_set(G_OBJECT(streammux), "width", 1280, "height", 720, "batch-size", 1, "batched-push-timeout", 40000, NULL);
+    g_object_set(G_OBJECT(streammux), "width", 1280, "height", 720, "batch-size", 1, 
+    			"batched-push-timeout", 40000, NULL);
     g_object_set(G_OBJECT(sink), "sync", FALSE, NULL);
 
 	/* Add multiple elements into a GstBin at once
