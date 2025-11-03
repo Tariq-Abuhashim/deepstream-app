@@ -19,7 +19,7 @@ pipeline:
 uridecodebin → nvstreammux → nvinfer (DETR) → nvtracker → nvvideoconvert → nvdsosd → nveglglessink
 
 run:
-./build/deepstream_detr_app file:///home/mrt/src/ByteTrack/videos/
+./build/deepstream-track file:///home/mrt/dev/window-tracker/deepstream-app/videos/palace.mp4
 
 June, 19, 2025
 */

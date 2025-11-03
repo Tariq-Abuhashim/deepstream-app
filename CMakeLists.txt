@@ -144,8 +144,8 @@ target_compile_definitions(deepstream-orbslam PRIVATE
 )
 
 # DeepStream-only app
-add_executable(deepstream-app main.cpp)
-target_link_libraries(deepstream-app
+add_executable(deepstream-track track.cpp)
+target_link_libraries(deepstream-track
     nvds_infercustomparser_detr
     DeepStream::nvdsgst_meta
     DeepStream::nvds_meta
@@ -161,5 +161,5 @@ target_link_libraries(deepstream-app
 )
 
 # Install rule (optional)
-install(TARGETS deepstream-app deepstream-orbslam DESTINATION bin)
+install(TARGETS deepstream-track deepstream-orbslam DESTINATION bin)
 

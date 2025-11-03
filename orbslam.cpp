@@ -1,5 +1,7 @@
 /*
    Folder structure:
+   -------------------
+   
    deepstream-app/
    ├── build
    ├── build_and_run.sh
@@ -15,16 +17,63 @@
    ├── nvdsinfer_customparser_detr.cpp
    └── tracker_config.txt
 
-Pipeline:
-   uridecodebin → nvstreammux → nvinfer → nvtracker → nvvideoconvert → tee
-                                                       				 ↘ queue → nvosd → sink
-                                                        			 ↘ queue → appsink (ORB-SLAM3)
 
-run:
-./deepstream_orbslam <uri> <ORBvoc.txt> <settings.yaml>
+	Pipeline explained:
+	-------------------
 
-June, 19, 2025, initially implemented as main.cpp
-August, 26, 2025, orbslam updates
+	uridecodebin → nvstreammux → nvinfer → nvtracker → nvvideoconvert → tee
+																		↘ queue → nvosd → sink
+																		↘ queue → appsink (ORB-SLAM3)
+		                                                    			 
+	uridecodebin                # Reads and decodes your video (any codec)
+	 → nvvideoconvert_pre       # Converts GPU format → NVMM (GPU buffer)
+	 → capsfilter_pre           # Forces 1280×720 to avoid NVDEC error
+	 → nvstreammux              # DeepStream batcher input
+	 → nvinfer (pgie)           # Object detection (your DETR model)
+	 → nvtracker                # Object tracker
+	 → nvvideoconvert           # Color/format conversion
+	 → tee                      # Split stream into two parallel branches
+		 ↘ queue_osd → nvvideoconvert_osd → nvdsosd → sink       (for display)
+		 ↘ queue_app → nvvideoconvert_app → capsfilter_app → appsink  (for ORB-SLAM3)
+		 
+		 		 
+	Run a minimal pipeline that just displays the file:
+	---------------------------------------------------
+
+	gst-launch-1.0 filesrc location=/home/mrt/dev/window-tracker/deepstream-app/videos/flight.mp4 ! qtdemux ! decodebin ! nvvideoconvert ! nveglglessink
+
+	Run the complete pipeline:
+	--------------------------
+
+	./build/deepstream_orbslam <uri> <ORBvoc.txt> <settings.yaml>
+
+	// Example using kitti
+	./build/deepstream-orbslam \
+	file:///home/mrt/dev/window-tracker/deepstream-app/videos/drive.mp4 \
+	../ORB_SLAM3/Vocabulary/ORBvoc.txt \
+	/media/mrt/Whale/data/kitti/07/KITTI04-12.yaml
+	
+	// Example using vulcan
+	./build/deepstream-orbslam \
+	file:///home/mrt/dev/window-tracker/deepstream-app/videos/vulcan.mp4 \
+	../ORB_SLAM3/Vocabulary/ORBvoc.txt \
+	../ORB_SLAM3/Examples/Monocular/vulcan.yaml
+
+
+
+	Video dimensions and the GPU:
+	-----------------------------
+
+	Note: Convert your input video to a smaller resolution before running DeepStream
+	This ensures even NVDEC can open it safely:
+	ffmpeg -i 2024-06-28-03-47-19-uotf-orbit-16-down.mp4 -vf scale=1280:720 -c:v libx264 -crf 20 flight.mp4
+
+	Change Logs:
+	------------
+
+	June, 19, 2025, initially implemented as main.cpp
+	August, 26, 2025, initial orbslam updates
+	October, 07, 2025, working orbslam handler (not tested with orbslam)
 
 */
 
@@ -45,6 +94,7 @@ August, 26, 2025, orbslam updates
 #include <opencv2/opencv.hpp>
 
 #include <queue>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <condition_variable>
@@ -86,9 +136,11 @@ struct FramePacket {
 
 // define global frame queue from appsink → SLAM worker
 //std::queue<cv::Mat> frameQueue; // image only
-std::queue<FramePacket> g_queue; // image + detections
+std::deque<FramePacket> g_queue; // image + detections
 std::mutex g_mutex;
 std::condition_variable g_cond;
+
+const size_t MAX_QUEUE = 50; // tune down from 1283
 
 
 // (Optional) keep if we still want console logs on the OSD branch
@@ -159,6 +211,8 @@ static GstPadProbeReturn print_meta_probe(GstPad *pad, GstPadProbeInfo *info, gp
             NvDsObjectMeta *om = (NvDsObjectMeta*)l_obj->data;
             obj_count++;
             std::cout << "[PROBE][" << (char*)user_data << "] frame#" << fmeta->frame_num
+            		  << " frame_w=" << fmeta->source_frame_width
+          			  << " frame_h=" << fmeta->source_frame_height
                       << " src=" << fmeta->source_id
                       << " objID=" << om->object_id
                       << " class=" << om->class_id
@@ -166,13 +220,20 @@ static GstPadProbeReturn print_meta_probe(GstPad *pad, GstPadProbeInfo *info, gp
                       << " bbox=(" << om->rect_params.left << "," << om->rect_params.top
                       << "," << om->rect_params.width << "x" << om->rect_params.height << ")"
                       << std::endl;
+                      
+          std::cout << "[tracker_src] frame=" << fmeta->frame_num
+          << " frame_w=" << fmeta->source_frame_width
+          << " frame_h=" << fmeta->source_frame_height
+          << " box=(" << om->rect_params.left << "," << om->rect_params.top
+          << "," << om->rect_params.width << "x" << om->rect_params.height << ")\n";
+          
+          
         }
         std::cout << "[PROBE][" << (char*)user_data << "] frame#" << fmeta->frame_num
                   << " total_objs=" << obj_count << std::endl;
     }
     return GST_PAD_PROBE_OK;
 }
-
 
 static void pad_added_handler(GstElement *src, GstPad *new_pad, gpointer user_data) {
     GstElement *streammux = (GstElement *)user_data;
@@ -198,6 +259,46 @@ static void pad_added_handler(GstElement *src, GstPad *new_pad, gpointer user_da
 
     gst_object_unref(sink_pad);
 }
+
+/*
+static void pad_added_handler(GstElement *src, GstPad *new_pad, gpointer user_data) {
+    GstElement *nvvidconv_pre = (GstElement *)user_data;
+	
+    g_print("Received new pad from source, linking to preprocessor...\n");
+
+    GstPad *sink_pad = gst_element_get_static_pad(nvvidconv_pre, "sink");
+    if (gst_pad_is_linked(sink_pad)) {
+        g_print("nvvidconv_pre sink pad already linked, skipping.\n");
+        gst_object_unref(sink_pad);
+        return;
+    }
+
+    //GstCaps *caps = gst_pad_query_caps(new_pad, NULL);
+    GstCaps *caps = gst_pad_get_current_caps(new_pad);
+    if (!caps) {
+    	g_print("No caps on new pad, skipping\n");
+    	gst_object_unref(sink_pad);
+    	return;
+	}
+	GstStructure *structure = gst_caps_get_structure(caps, 0);
+	if (!structure) {
+		g_printerr("Invalid caps structure, skipping link.\n");
+		gst_caps_unref(caps);
+		gst_object_unref(sink_pad);
+		return;
+	}
+    const gchar *name = gst_structure_get_name(structure);
+    if (name && g_str_has_prefix(name, "video/x-raw")) {
+        if (gst_pad_link(new_pad, sink_pad) == GST_PAD_LINK_OK)
+            g_print("Linked uridecodebin → nvvidconv_pre successfully.\n");
+        else
+            g_printerr("Failed to link uridecodebin → nvvidconv_pre.\n");
+    }
+
+	gst_caps_unref(caps);
+    gst_object_unref(sink_pad);
+}
+*/
 
 
 NvBufSurface* getNvDsMetaSurface(GstBuffer *buffer) {
@@ -448,7 +549,10 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
     
     {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_queue.push(FramePacket{ bgr.clone(), ts, std::move(objs) });
+        if (g_queue.size() >= MAX_QUEUE) {
+        	g_queue.pop_front();
+        }
+        g_queue.push_back(FramePacket{ bgr.clone(), ts, std::move(objs) });
         std::cout << "[APPSINK] Frame queued, queue size: " << g_queue.size() << "\n";
     }
     g_cond.notify_one();
@@ -524,9 +628,11 @@ int main(int argc, char *argv[]) {
     gst_init(&argc, &argv);
 
 	/* Element factory 
+		Basic object detection branch
     */
     GstElement *pipeline  = gst_pipeline_new("deepstream-pipeline");
     GstElement *source    = gst_element_factory_make("uridecodebin", "src");
+    // → we can insert a preprocessing step here
     GstElement *streammux = gst_element_factory_make("nvstreammux", "streammux");
     GstElement *pgie      = gst_element_factory_make("nvinfer", "pgie");
     GstElement *tracker   = gst_element_factory_make("nvtracker", "tracker");
@@ -535,10 +641,31 @@ int main(int argc, char *argv[]) {
     GstElement *sink      = gst_element_factory_make("nveglglessink", "sink");
 
     if (!pipeline || !source || !streammux || !pgie || !tracker || !nvvidconv || !nvosd || !sink) {
-        std::cerr << "Failed to create elements." << std::endl;
+        std::cerr << "Failed to create a main pipeline elements." << std::endl;
         return -1;
     }
-     
+
+	/* Insert a preprocessing branch between uridecodebin and nvstreammux
+		This forces a smaller frame size, for example 1280×720 (within GPU macroblocks limit (8192): 1280×720 → 3600 macroblocks).
+		
+		uridecodebin
+		   → nvvideoconvert_pre
+		   → capsfilter_pre (forces 1280×720)
+		   → nvstreammux
+    */
+    /*
+    GstElement *nvvidconv_pre = gst_element_factory_make("nvvideoconvert", "nvvidconv_pre");
+	GstElement *capsfilter_pre = gst_element_factory_make("capsfilter", "capsfilter_pre");
+	
+	if (!nvvidconv_pre || !capsfilter_pre) {
+    	std::cerr << "Failed to create pre-processing elements." << std::endl;
+    	return -1;
+	}
+	*/
+
+    /* Element factory
+    	orbslam branch
+    */
 	GstElement *tee;
 	GstElement *queue_osd;
 	GstElement *nvvidconv_osd;
@@ -557,15 +684,42 @@ int main(int argc, char *argv[]) {
 		appsink        = gst_element_factory_make("appsink", "appsink");
 
 		if (!tee || !queue_osd || !nvvidconv_osd || !queue_app || !nvvidconv_app || !capsfilter_app || !appsink) {
-		    std::cerr << "Failed to create a display element." << std::endl;
+		    std::cerr << "Failed to create an orbslam element." << std::endl;
 		    return -1;
 		}
-    }	
+    }
+    
+    /* print factories 
+	*/
+    #define CHECK_ELEM(e) if (!(e)) { g_printerr("Missing element: %s\n", #e); return -1; }
+	CHECK_ELEM(pipeline);
+	CHECK_ELEM(source);
+	CHECK_ELEM(streammux);
+	CHECK_ELEM(pgie);
+	CHECK_ELEM(tracker);
+	CHECK_ELEM(nvvidconv);
+	CHECK_ELEM(tee);
+	CHECK_ELEM(queue_osd);
+	CHECK_ELEM(nvvidconv_osd);
+	CHECK_ELEM(nvosd);
+	CHECK_ELEM(sink);
+	CHECK_ELEM(queue_app);
+	//CHECK_ELEM(nvvidconv_app);
+	//CHECK_ELEM(capsfilter_app);
+	CHECK_ELEM(appsink);
 
 	/* GObject Property sitter 
 	*/
     g_object_set(G_OBJECT(source), "uri", argv[1], NULL);
-    g_object_set(G_OBJECT(pgie), "config-file-path", PGIE_CONFIG_FILE, NULL);
+    g_object_set(G_OBJECT(pgie), "config-file-path", PGIE_CONFIG_FILE, "batch-size", 1, NULL);
+    
+    // FIXME Define caps that keep NVMM memory and limit resolution
+    // preprocessing element
+    /*
+	GstCaps *caps_pre = gst_caps_from_string("video/x-raw(memory:NVMM), width=1280, height=720, format=NV12");
+	g_object_set(G_OBJECT(capsfilter_pre), "caps", caps_pre, NULL);
+	gst_caps_unref(caps_pre);
+	*/
     
     // Check if tracker library exists
 	std::string tracker_lib = "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so";
@@ -596,7 +750,9 @@ int main(int argc, char *argv[]) {
              NULL);
     g_print("Tracker element created successfully\n");
     
-    g_object_set(G_OBJECT(streammux), "width", 1382, "height", 512, "batch-size", 1, 
+    g_object_set(G_OBJECT(streammux), 
+    			"width", 1280, "height", 720, // 1382 x 512  for kitti dataset, but now it limited
+    			"batch-size", 1,
     			"batched-push-timeout", 40000, NULL);
     g_object_set(G_OBJECT(sink), "sync", FALSE, "async", FALSE, NULL);
 
@@ -631,15 +787,31 @@ int main(int argc, char *argv[]) {
 					queue_osd, nvvidconv_osd, nvosd, sink,
 					queue_app, nvvidconv_app, capsfilter_app, appsink,
 					NULL);
+		/*	
+		gst_bin_add_many(GST_BIN(pipeline),
+    				source, nvvidconv_pre, capsfilter_pre, streammux, pgie, tracker, nvvidconv,
+    				tee, 
+    				queue_osd, nvvidconv_osd, nvosd, sink,
+    				queue_app, nvvidconv_app, capsfilter_app, appsink,
+   					NULL);
+   		*/
     } else {
 		gst_bin_add_many(GST_BIN(pipeline),
-		                 source, streammux, pgie, tracker, nvvidconv, nvosd, sink,
-		                 NULL);
+					source, streammux, pgie, tracker, nvvidconv, 
+					nvosd, sink,
+					NULL);
+		/*
+		gst_bin_add_many(GST_BIN(pipeline),
+					source, nvvidconv_pre, capsfilter_pre, streammux, pgie, tracker, nvvidconv, 
+					nvosd, sink,
+					NULL);
+		*/
     }
 
 	/* Hanble dynamic pads
     */
     g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), streammux);
+    //g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), nvvidconv_pre);
     if (orbslam) {
 		g_signal_connect(appsink, "new-sample", G_CALLBACK(orbslam_handler), NULL); // Orbslam updates
 	}
@@ -656,7 +828,35 @@ int main(int argc, char *argv[]) {
            										↘→ queue_osd → nvosd → sink
            										↘→ queue → nvvidconv → capsfilter → appsink (ORB-SLAM3)
     */
+    //GstPad *mux_sink_pad_ref = NULL;
+    GstPad *tee_src_pad_osd = NULL, *tee_src_pad_app = NULL;
  	if (orbslam) { 
+ 	
+ 		// Link preprocessing elements to streammux
+ 		/*
+		GstPad *mux_sink_pad = gst_element_get_request_pad(streammux, "sink_0");
+		if (!mux_sink_pad) {
+			g_printerr("Failed to get request pad sink_0 from streammux.\n");
+			return -1;
+		}
+		GstPad *caps_src = gst_element_get_static_pad(capsfilter_pre, "src");
+		if (!caps_src) {
+			g_printerr("Failed to get src pad from capsfilter_pre.\n");
+			gst_object_unref(mux_sink_pad);
+			return -1;
+		}
+		if (gst_pad_link(caps_src, mux_sink_pad) != GST_PAD_LINK_OK) {
+			g_printerr("Failed to link capsfilter_pre → streammux sink_0.\n");
+			gst_object_unref(caps_src);
+			gst_object_unref(mux_sink_pad);
+			return -1;
+		}
+		gst_object_unref(caps_src);
+
+		// Store for release on shutdown
+		mux_sink_pad_ref = mux_sink_pad;
+		*/
+	
 		// Link main path (before tee)
 		if (!gst_element_link_many(streammux, pgie, tracker, nvvidconv, tee, NULL)) {
 			g_printerr("Main pipeline elements could not be linked.\n");
@@ -664,7 +864,7 @@ int main(int argc, char *argv[]) {
 		}
 
 		// Request a new src pad from tee for OSD branch
-		GstPad *tee_src_pad_osd = gst_element_get_request_pad(tee, "src_%u");
+		tee_src_pad_osd = gst_element_get_request_pad(tee, "src_%u");
 		GstPad *queue_osd_sink_pad = gst_element_get_static_pad(queue_osd, "sink");
 		if (gst_pad_link(tee_src_pad_osd, queue_osd_sink_pad) != GST_PAD_LINK_OK) {
 			g_printerr("Tee to OSD branch could not be linked.\n");
@@ -674,7 +874,7 @@ int main(int argc, char *argv[]) {
 		gst_object_unref(tee_src_pad_osd);
 
 		// Request a new src pad from tee for App branch
-		GstPad *tee_src_pad_app = gst_element_get_request_pad(tee, "src_%u");
+		tee_src_pad_app = gst_element_get_request_pad(tee, "src_%u");
 		GstPad *queue_app_sink_pad = gst_element_get_static_pad(queue_app, "sink");
 		if (gst_pad_link(tee_src_pad_app, queue_app_sink_pad) != GST_PAD_LINK_OK) {
 			g_printerr("Tee to App branch could not be linked.\n");
@@ -696,6 +896,16 @@ int main(int argc, char *argv[]) {
 			return -1;
 		}
 	} else {
+	
+		// Link preprocessing elements to streammux
+		/*
+ 		if (!gst_element_link_many(nvvidconv_pre, capsfilter_pre, streammux, NULL)) {
+    		g_printerr("Failed to link preprocessing elements.\n");
+    		return -1;
+		}
+		*/
+		
+		// Link main path and display sink
 	    if (!gst_element_link_many(streammux, pgie, tracker, nvvidconv, nvosd, sink, NULL)) {
 		    g_printerr("Elements could not be linked.\n");
 		    return -1;
@@ -728,10 +938,11 @@ int main(int argc, char *argv[]) {
 	}*/
 	
 	// Check if elements reached PLAYING state
+	/*
 	GstState state;
 	gst_element_get_state(tee, &state, NULL, GST_CLOCK_TIME_NONE);
 	g_print("Tee state: %d (4=PLAYING)\n", state);
-
+	
 	gst_element_get_state(queue_osd, &state, NULL, GST_CLOCK_TIME_NONE);  
 	g_print("Queue_osd state: %d (4=PLAYING)\n", state);
 
@@ -746,6 +957,7 @@ int main(int argc, char *argv[]) {
 
 	GstStateChangeReturn ret_conv = gst_element_set_state(nvvidconv_app, GST_STATE_PLAYING);
 	g_print("Nvvidconv_app state change result: %d\n", ret_conv);
+	*/
 	
 	
 	/* set your pipeline to PLAYING state.
@@ -755,6 +967,9 @@ int main(int argc, char *argv[]) {
 		g_printerr("Pipeline failed to start!\n");
 		return -1;
 	}
+	GstState state;
+	gst_element_get_state(pipeline, &state, NULL, 5 * GST_SECOND);
+	g_print("Pipeline state: %d\n", state);
 	
     std::cout << "Running DeepStream + ORB-SLAM3 pipeline..." << std::endl;
     
@@ -762,7 +977,7 @@ int main(int argc, char *argv[]) {
     */
     std::cout << argv[2] << std::endl;
     std::cout << argv[3] << std::endl;
-    ORB_SLAM3::System SLAM(argv[2], argv[3], ORB_SLAM3::System::MONOCULAR, false);
+    ORB_SLAM3::System SLAM(argv[2], argv[3], ORB_SLAM3::System::MONOCULAR, true);
     std::thread orbslamThread([&]() {
     	cv::Mat gray; // keep local copies to avoid repeated allocations
 		while (true) {
@@ -772,7 +987,7 @@ int main(int argc, char *argv[]) {
 				std::unique_lock<std::mutex> lock(g_mutex);
 				g_cond.wait(lock, []{ return !g_queue.empty(); });
 				pkt = std::move(g_queue.front());
-				g_queue.pop();
+				g_queue.pop_front();
 			}
 			if (pkt.frame_bgr.empty()) {
 				std::cerr << "[ORBSLAM] Empty frame received, skipping\n";
@@ -792,7 +1007,7 @@ int main(int argc, char *argv[]) {
 		    //          << "x" << gray.channels() << " objs=" << pkt.objects.size() << "\n";
 
 		    // plain SLAM
-		    //SLAM.TrackMonocular(gray, ts);
+		    SLAM.TrackMonocular(gray, ts);
 		    
 		    // object-level adapter (new implementation)
 			// e.g., associate 2D boxes with landmarks, semantic constraints, etc.
@@ -802,7 +1017,7 @@ int main(int argc, char *argv[]) {
           	std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		} // while loop
 	});
-	orbslamThread.detach();
+	//orbslamThread.detach();
 
 	/* The GstBus is where the pipeline posts messages
     gst_bus_timed_pop_filtered blocks forever (GST_CLOCK_TIME_NONE) until:
@@ -814,8 +1029,11 @@ int main(int argc, char *argv[]) {
 	g_signal_connect(bus, "message::error", G_CALLBACK(bus_error_callback), NULL);
 	g_signal_connect(bus, "message::warning", G_CALLBACK(bus_warning_callback), NULL);
 
-    GstMessage *msg = gst_bus_timed_pop_filtered(bus, GST_CLOCK_TIME_NONE,
-                                                 (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+    GstMessage *msg = gst_bus_timed_pop_filtered(
+    		bus, 
+    		GST_CLOCK_TIME_NONE,
+            (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS)
+    );
     if (msg) { // !=NULL
         GError *err = nullptr;
         gchar *debug_info = nullptr;
@@ -835,12 +1053,19 @@ int main(int argc, char *argv[]) {
         }
         gst_message_unref(msg);
     }
+    
+    orbslamThread.join();
 
     /* shutdown sequence
     */
     gst_element_set_state(pipeline, GST_STATE_NULL); // stop the pipeline
-    //gst_element_release_request_pad(tee, tee_src_pad_osd); // release pads
-	//gst_element_release_request_pad(tee, tee_src_pad_app); // release pads
+    
+	//gst_element_release_request_pad(streammux, mux_sink_pad_ref);
+	//gst_object_unref(mux_sink_pad_ref);
+	gst_element_release_request_pad(tee, tee_src_pad_osd);
+	gst_element_release_request_pad(tee, tee_src_pad_app);
+	gst_object_unref(tee_src_pad_osd);
+	gst_object_unref(tee_src_pad_app);
     gst_object_unref(bus); // free bus
     gst_object_unref(pipeline); // free pipeline
     return 0;
