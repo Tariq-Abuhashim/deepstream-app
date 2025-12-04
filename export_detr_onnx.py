@@ -13,7 +13,7 @@ trtexec --onnx=detr_simplified.onnx \
         --saveEngine=detr.engine \
         --fp16 \
         --workspace=2048 \
-        --shapes=pixel_values:1x3x800x1273 \
+        --shapes=pixel_values:1x3x720x1280 \
         --verbose=3 \
         --tacticSources=+CUDNN,-CUBLAS_LT
 '''
@@ -22,7 +22,7 @@ from transformers import DetrForObjectDetection
 import torch
 
 # Load model and move to CUDA
-model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50").eval().cuda()  # <- Critical change
+model = DetrForObjectDetection.from_pretrained("/media/mrt/Whale/git-large-files/detr/pcc5/person-car/20250215-res101/checkpoint1199.pth").eval().cuda()  # <- Critical change
 
 # Create input tensor on CUDA
 dummy_input = torch.randn(1, 3, 720, 1280, device='cuda')  # Must match model device
