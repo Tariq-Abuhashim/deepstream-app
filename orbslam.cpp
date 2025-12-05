@@ -277,19 +277,22 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
         return false;
     }
 
-    // Sync the surface data
-    if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
-        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceSyncForCpu failed\n");
-        NvBufSurfaceDestroy(dst_surf);
-        return false;
-    }
-
-    // Map the destination (CPU) buffer
+    // Map the destination (CPU) buffer FIRST
     if (NvBufSurfaceMap(dst_surf, 0, 0, NVBUF_MAP_READ) != 0) {
         g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceMap failed (dst)\n");
         NvBufSurfaceDestroy(dst_surf);
         return false;
     }
+
+    // Sync the surface data AFTER mapping (may not be needed on all platforms)
+    #ifndef __aarch64__
+    if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
+        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceSyncForCpu failed\n");
+        NvBufSurfaceUnMap(dst_surf, 0, 0);
+        NvBufSurfaceDestroy(dst_surf);
+        return false;
+    }
+    #endif
 
     NvBufSurfaceParams *params = &dst_surf->surfaceList[0];
 
