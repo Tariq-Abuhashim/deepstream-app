@@ -228,7 +228,7 @@ NvBufSurface* getNvDsMetaSurface(GstBuffer *buffer) {
 }
 
 
-// helper to make a CPU NvBufSurface and copy with NvBufSurfTransform
+// Fixed helper to make a CPU NvBufSurface and copy with NvBufSurfTransform
 static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     if (!src_surf || src_surf->numFilled < 1) {
         g_printerr("[copyNvToCpuAndMakeBGR] Invalid source surface\n");
@@ -243,7 +243,15 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     create_params.height = src_surf->surfaceList[0].height;
     create_params.colorFormat = src_surf->surfaceList[0].colorFormat;
     create_params.layout = NVBUF_LAYOUT_PITCH;
-    create_params.memType = NVBUF_MEM_CUDA_UNIFIED;   
+    
+    // KEY FIX: Use NVBUF_MEM_SURFACE_ARRAY for Jetson instead of NVBUF_MEM_CUDA_UNIFIED
+    #ifdef __aarch64__
+        // Jetson (ARM64) - use surface array
+        create_params.memType = NVBUF_MEM_SURFACE_ARRAY;
+    #else
+        // x86_64 PC - unified memory works
+        create_params.memType = NVBUF_MEM_CUDA_UNIFIED;
+    #endif
 
     if (NvBufSurfaceCreate(&dst_surf, 1, &create_params) != 0) {
         g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceCreate failed\n");
@@ -254,6 +262,7 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     NvBufSurfTransformConfigParams config_params;
     memset(&config_params, 0, sizeof(config_params));
     config_params.compute_mode = NvBufSurfTransformCompute_Default;
+    config_params.gpu_id = src_surf->gpuId;
     NvBufSurfTransformSetSessionParams(&config_params);
 
     NvBufSurfTransformParams xform_params;
@@ -268,19 +277,34 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
         return false;
     }
 
-    // ✅ Map the destination (CPU) buffer — not the source
+    // Sync the surface data
+    if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
+        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceSyncForCpu failed\n");
+        NvBufSurfaceDestroy(dst_surf);
+        return false;
+    }
+
+    // Map the destination (CPU) buffer
     if (NvBufSurfaceMap(dst_surf, 0, 0, NVBUF_MAP_READ) != 0) {
         g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceMap failed (dst)\n");
         NvBufSurfaceDestroy(dst_surf);
         return false;
     }
 
-    NvBufSurfaceSyncForCpu(dst_surf, 0, 0);
     NvBufSurfaceParams *params = &dst_surf->surfaceList[0];
 
+    // Get Y and UV plane data
     uint8_t *y_data = (uint8_t *)params->mappedAddr.addr[0];
+    if (!y_data) {
+        g_printerr("[copyNvToCpuAndMakeBGR] NULL Y data pointer\n");
+        NvBufSurfaceUnMap(dst_surf, 0, 0);
+        NvBufSurfaceDestroy(dst_surf);
+        return false;
+    }
+    
     uint8_t *uv_data = y_data + (params->pitch * params->height);
 
+    // Create OpenCV wrappers
     cv::Mat y(params->height, params->width, CV_8UC1, y_data, params->pitch);
     cv::Mat uv(params->height / 2, params->width / 2, CV_8UC2, uv_data, params->pitch);
 
@@ -290,10 +314,13 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     cv::Mat uv_single = uv.reshape(1, params->height / 2);
     uv_single.copyTo(nv12(cv::Rect(0, params->height, params->width, params->height / 2)));
 
+    // Convert to BGR
     cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
 
+    // Cleanup
     NvBufSurfaceUnMap(dst_surf, 0, 0);
     NvBufSurfaceDestroy(dst_surf);
+    
     return true;
 }
 
