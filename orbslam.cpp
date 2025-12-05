@@ -44,16 +44,6 @@ std::atomic<bool> g_stop{false};
 #include <iostream>
 #include <cstring>
 
-// prints help
-void print_help() {
-    std::ifstream f("README.md");
-    if (!f.is_open()) {
-        std::cerr << "ERROR: README.md not found\n";
-        return;
-    }
-    std::cout << f.rdbuf();
-}
-
 // define detected objects
 struct DetectedObject {
     int id;           // DeepStream tracker ID
@@ -614,9 +604,70 @@ static gboolean bus_warning_callback(GstBus *bus, GstMessage *msg, gpointer data
     return FALSE;  // Remove from event loop
 }
 
+
+// prints help
+void print_readme() {
+    std::ifstream f("README.md");
+    if (!f.is_open()) {
+        std::cerr << "ERROR: README.md not found\n";
+        return;
+    }
+    std::cout << f.rdbuf();
+}
+
+void print_help() {
+    std::cout <<
+    "Usage: app <uri> <ORBvoc.txt> <settings.yaml> [options]\n"
+    "\n"
+    "Options:\n"
+    "  --help            Show this help message\n"
+    "  --headless        Run without visualization\n"
+    "  --orbslam         Enable ORB-SLAM processing\n"
+    "  --log_to_file     Save logs to file\n";
+}
+
+
 // Usage: deepstream-orbslam <uri> <ORBvoc.txt> <settings.yaml> <config_infer_primary_detr.txt>
 int main(int argc, char *argv[]) {
 
+	// Help
+    if (argc < 1) {
+        print_help();
+        return 1;
+    }
+    
+	// Defaults
+    bool headless = false;
+    bool orbslam = false;
+    bool log_to_file = false;
+
+    // Positional arguments
+    std::string uri;
+    std::string vocfile;
+    std::string settings;
+    
+    // Parse arguments
+    std::vector<std::string> args(argv + 1, argv + argc);
+	for (auto& arg : args) {
+		if (arg=="-h" || arg=="--h") {
+			print_help();
+			return 0;
+		}
+		else if (arg=="-help" || arg=="--help") {
+			print_readme();
+			return 0;
+		}
+		else if (arg=="--headless") {
+			headless = true;
+		}
+		else if (arg=="--orbslam") {
+			orbslam = true;
+		}
+		else if (arg==) {
+			log_to_file = true;
+		}
+	}
+    
 	if (strcmp(argv[1], "-help") || strcmp(argv[1], "--help")) {
 		print_help();
 		return 0;
@@ -630,6 +681,7 @@ int main(int argc, char *argv[]) {
     
     bool headless = (argc == 5 && std::string(argv[4]) == "--headless");
 	bool orbslam = true;
+	bool log_to_file = true;
 	
 	std::cout << "[INFO] Running in " << (headless ? "HEADLESS" : "DISPLAY") << " mode.\n";
     
@@ -911,10 +963,12 @@ int main(int argc, char *argv[]) {
 
 
 	/* Attach a print prob to nvtracker sink pad */
-	GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
-	gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                  print_meta_probe, (gpointer)"nvtracker", NULL);
-	gst_object_unref(tracker_src_pad);
+	if (log_to_file) {
+		GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
+		gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                  	print_meta_probe, (gpointer)"nvtracker", NULL);
+		gst_object_unref(tracker_src_pad);
+	}
 
 		
 	/* Start playing */
