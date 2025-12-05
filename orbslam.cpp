@@ -361,22 +361,30 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
     /* 1. Initial State - 64 Byte Buffer
     */
     GstMapInfo map;
-    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        std::cout << "[APPSINK] Buffer mapped, size: " << map.size << " bytes\n";
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        g_printerr("[APPSINK] Failed to map buffer\n");
+        gst_sample_unref(sample);
+        return GST_FLOW_OK;
+    }
+	std::cout << "[APPSINK] Buffer mapped, size: " << map.size << " bytes\n";
         
     /* 2. Surface Contains Pointers to GPU Memory
     */
-        surf = (NvBufSurface*)map.data;
-        gst_buffer_unmap(buffer, &map);
-        std::cout << "[APPSINK] Buffer unmapped\n";
-    } 
-    std::cout << "[APPSINK] Got NvBufSurface, numFilled=" << surf->numFilled << std::endl;
-    
-    if (!surf || surf->numFilled == 0) {
+    surf = (NvBufSurface*)map.data;
+	gst_buffer_unmap(buffer, &map);
+	std::cout << "[APPSINK] Buffer unmapped\n";
+	
+	if (!surf || surf->numFilled == 0) {
         g_printerr("[APPSINK] Invalid NvBufSurface\n");
         gst_sample_unref(sample);
         return GST_FLOW_OK;
     }
+
+    std::cout << "[APPSINK] Got NvBufSurface, numFilled=" << surf->numFilled << std::endl;
+    std::cout << "[APPSINK] Surface info: memType=" << surf->memType
+              << " colorFormat=" << surf->surfaceList[0].colorFormat
+              << " width=" << surf->surfaceList[0].width
+              << " height=" << surf->surfaceList[0].height << std::endl;
     
     /* Surface parameters
     NvBufSurfaceParams *params = &surf->surfaceList[0];
@@ -386,7 +394,17 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
 	 - colorFormat: 33 (NV12)
 	 - pitch: 1536 (row stride in bytes)
 	 - dataPtr: 0x7f3766400000 (GPU memory address!)
-	*/ 
+	*/
+    
+    // Create OpenCV Mat
+    cv::Mat bgr;
+    
+    // Check if this is NVMM (GPU) memory
+    // memType values: 0=default, 1=pinned, 2=device, 3=unified, 4=surface_array
+    bool is_gpu_memory = (surf->memType == NVBUF_MEM_CUDA_DEVICE ||
+                          surf->memType == NVBUF_MEM_DEFAULT ||
+                          surf->memType == NVBUF_MEM_SURFACE_ARRAY ||
+                          surf->surfaceList[0].mappedAddr.addr[0] == nullptr);
     
     /* 3. Map GPU Memory to CPU
     After mapping, params->mappedAddr.addr[0] now points to CPU-accessible memory!
@@ -395,16 +413,18 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
     std::cout << "memType=" << surf->memType
           << " mappedAddr=" << surf->surfaceList[0].mappedAddr.addr[0]
           << " dataPtr=" << surf->surfaceList[0].dataPtr << std::endl;
-    cv::Mat bgr;
+
     // If buffer is on GPU, use transform to copy into CPU system memory
-	if (surf->memType == NVBUF_MEM_CUDA_DEVICE || surf->memType == NVBUF_MEM_DEFAULT) {
-		std::cout << "[APPSINK] Surface is GPU memory (NVBUF_MEM_CUDA_DEVICE), copying to CPU...\n";
+	if (is_gpu_memory) {
+		 std::cout << "[APPSINK] Detected GPU memory, using transform to copy to CPU...\n";
 		if (!copyNvToCpuAndMakeBGR(surf, bgr)) {
 		    g_printerr("[APPSINK] Failed to transform NVMM -> CPU\n");
 		    gst_sample_unref(sample);
 		    return GST_FLOW_OK;
 		}
+		std::cout << "[APPSINK] Transform successful\n";
 	} else {
+		// CPU memory path (unlikely with NVMM)
 		if (NvBufSurfaceMap(surf, 0, 0, NVBUF_MAP_READ) != 0) {
 		    g_printerr("[APPSINK] NvBufSurfaceMap failed\n");
 		    gst_sample_unref(sample);
@@ -454,7 +474,8 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
 		    /* Extract Pixel Data
 		    */
 		    // Start of Y plane
-		    uint8_t *y_data = (uint8_t*)(params->mappedAddr.addr[0] ? params->mappedAddr.addr[0] : params->dataPtr);
+		    uint8_t *y_data = (uint8_t*)(params->mappedAddr.addr[0] ? 
+		    							 params->mappedAddr.addr[0] : params->dataPtr);
 		    if (!y_data) {
 		        g_printerr("[APPSINK] NULL Y data pointer\n");
 		        NvBufSurfaceUnMap(surf, 0, 0);
