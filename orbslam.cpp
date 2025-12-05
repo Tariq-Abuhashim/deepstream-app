@@ -630,7 +630,7 @@ void print_help() {
 // Usage: deepstream-orbslam <uri> <ORBvoc.txt> <settings.yaml> <config_infer_primary_detr.txt>
 int main(int argc, char *argv[]) {
 
-	// Help
+	// No arguments at all
     if (argc < 1) {
         print_help();
         return 1;
@@ -639,16 +639,12 @@ int main(int argc, char *argv[]) {
 	// Defaults
     bool headless = false;
     bool orbslam = false;
-    bool log_to_file = false;
-
-    // Positional arguments
-    std::string uri;
-    std::string vocfile;
-    std::string settings;
+    bool verbose = false;
     
     // Parse arguments
-    std::vector<std::string> args(argv + 1, argv + argc);
-	for (auto& arg : args) {
+    std::vector<std::string> positional_args;
+	for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
 		if (arg=="-h" || arg=="--h") {
 			print_help();
 			return 0;
@@ -663,25 +659,31 @@ int main(int argc, char *argv[]) {
 		else if (arg=="--orbslam") {
 			orbslam = true;
 		}
-		else if (arg==) {
-			log_to_file = true;
-		}
+		else if (arg=="--verbose") {
+			verbose = true;
+		} else {
+            positional_args.push_back(arg);
+        }
 	}
+	
+	if (positional_args.size() < 3) {
+        std::cerr << "ERROR: Missing required arguments.\n";
+        print_help();
+        return 1;
+    }
     
-	if (strcmp(argv[1], "-help") || strcmp(argv[1], "--help")) {
-		print_help();
-		return 0;
-	}
+    // Assign positional arguments
+    std::string uri      = positional_args[0];
+    std::string vocfile  = positional_args[1];
+    std::string settings = positional_args[2];
 
-	if (argc < 4 || argc > 5) {
-		std::cerr << "Usage: " << argv[0] << " <uri> <ORBvoc.txt> <settings.yaml> [--headless]"
-				  << std::endl;
-		return -1;
-	}
-    
-    bool headless = (argc == 5 && std::string(argv[4]) == "--headless");
-	bool orbslam = true;
-	bool log_to_file = true;
+    std::cout << "[INFO] URI: "      << uri      << "\n";
+    std::cout << "[INFO] VOC: "      << vocfile  << "\n";
+    std::cout << "[INFO] Settings: " << settings << "\n";
+
+    std::cout << "[INFO] headless:    " << headless    << "\n";
+    std::cout << "[INFO] orbslam:     " << orbslam     << "\n";
+    std::cout << "[INFO] log_to_file: " << verbose << "\n";
 	
 	std::cout << "[INFO] Running in " << (headless ? "HEADLESS" : "DISPLAY") << " mode.\n";
     
@@ -963,7 +965,7 @@ int main(int argc, char *argv[]) {
 
 
 	/* Attach a print prob to nvtracker sink pad */
-	if (log_to_file) {
+	if (verbose) {
 		GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
 		gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
                   	print_meta_probe, (gpointer)"nvtracker", NULL);
