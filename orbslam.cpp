@@ -474,8 +474,7 @@ static GstFlowReturn orbslam_handler(GstElement *sink, gpointer user_data) {
 		    /* Extract Pixel Data
 		    */
 		    // Start of Y plane
-		    uint8_t *y_data = (uint8_t*)(params->mappedAddr.addr[0] ? 
-		    							 params->mappedAddr.addr[0] : params->dataPtr);
+		    uint8_t *y_data = (uint8_t*)(params->mappedAddr.addr[0] ? params->mappedAddr.addr[0] : params->dataPtr);
 		    if (!y_data) {
 		        g_printerr("[APPSINK] NULL Y data pointer\n");
 		        NvBufSurfaceUnMap(surf, 0, 0);
@@ -990,12 +989,10 @@ int main(int argc, char *argv[]) {
 
 
 	/* Attach a print prob to nvtracker sink pad */
-	if (verbose) {
-		GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
-		gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                  	print_meta_probe, (gpointer)"nvtracker", NULL);
-		gst_object_unref(tracker_src_pad);
-	}
+	GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
+	gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                  print_meta_probe, (gpointer)"nvtracker", NULL);
+	gst_object_unref(tracker_src_pad);
 
 		
 	/* Start playing */

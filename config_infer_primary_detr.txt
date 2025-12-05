@@ -18,8 +18,5 @@ force-implicit-batch-dim=1
 # Multiple classes, example:
 # num-detected-classes=3
 # pre-cluster-threshold=0.3;0.25;0.4
-num-detected-classes=1
-pre-cluster-threshold=0.2
-
-[class-attrs-all]
-pre-cluster-threshold=0.4
+num-detected-classes=91
+pre-cluster-threshold=0.1
