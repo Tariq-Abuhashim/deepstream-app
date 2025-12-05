@@ -1,4 +1,17 @@
 
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <cerrno>
+#include <cstdio>
+#include <queue>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <iostream>
+#include <string>
+#include <vector>
+
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 
@@ -15,15 +28,6 @@
 #include "gstnvdsmeta.h"
 
 #include <opencv2/opencv.hpp>
-
-#include <queue>
-#include <deque>
-#include <mutex>
-#include <thread>
-#include <condition_variable>
-#include <iostream>
-#include <string>
-#include <vector>
 
 #include <atomic>
 std::atomic<bool> g_stop{false};
