@@ -659,7 +659,7 @@ static gboolean bus_warning_callback(GstBus *bus, GstMessage *msg, gpointer data
 }
 
 
-// prints help
+// prints long help
 void print_readme() {
     std::ifstream f("README.md");
     if (!f.is_open()) {
@@ -669,6 +669,7 @@ void print_readme() {
     std::cout << f.rdbuf();
 }
 
+// prints short help
 void print_help() {
     std::cout <<
     "Usage: app <uri> <ORBvoc.txt> <settings.yaml> [options]\n"
@@ -1196,51 +1197,7 @@ int main(int argc, char *argv[]) {
     // Use POSIX _exit - most reliable on embedded Linux
     _exit(EXIT_SUCCESS);
     */
-	
-	/*
-    std::cout << "Setting pipeline to NULL state..." << std::endl;
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    std::cout << "✓ Pipeline stopped" << std::endl;  
-	gst_object_unref(bus);
-	gst_object_unref(pipeline);
-	*/
-
-    /* shutdown sequence
-    */  
-/* 
-	// 2. Release tee request pads if they exist
-    if (tee_src_pad_osd) {
-    	std::cout << "Release tee request osd pad..." << std::endl;
-        gst_element_release_request_pad(tee, tee_src_pad_osd);
-        gst_object_unref(tee_src_pad_osd);
-    }
-    if (tee_src_pad_app) {
-    	std::cout << "Release tee request app pad..." << std::endl;
-        gst_element_release_request_pad(tee, tee_src_pad_app);
-        gst_object_unref(tee_src_pad_app);
-    }
-
-	// 3. Unref the pads that were obtained during linking
-    if (queue_osd_sink_pad) {
-    	std::cout << "Unref osd sink pad..." << std::endl;
-        gst_object_unref(queue_osd_sink_pad);
-    }
-    if (queue_app_sink_pad) {
-    	std::cout << "Unref app sink pad..." << std::endl;
-        gst_object_unref(queue_app_sink_pad);
-    }
-	
-    // 4. Free the bus
-    std::cout << "Free the bus..." << std::endl;
-    gst_object_unref(bus);
-
-    // 5. Free the pipeline (this also frees all contained elements)
-    std::cout << "Free the pipeline..." << std::endl;
-    gst_object_unref(pipeline);
-
-    std::cout << "Cleanup complete." << std::endl;
-*/
-
+    
     return 0;
 }
 
