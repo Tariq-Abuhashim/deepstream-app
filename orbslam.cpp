@@ -8,7 +8,10 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
+#include <fstream>
+#include <sstream>
 #include <iostream>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -41,13 +44,6 @@ std::atomic<bool> g_stop{false};
 //#include <cstring>
 //#include <nvds_meta.h>
 
-#define PGIE_CONFIG_FILE "config_infer_primary_detr.txt"
-//#define TRACKER_CONFIG_FILE "tracker_config.txt"
-
-#include <fstream>
-#include <iostream>
-#include <cstring>
-
 // define detected objects
 struct DetectedObject {
     int id;           // DeepStream tracker ID
@@ -71,6 +67,43 @@ struct FramePacket {
     }
 };
 
+// Coordinate transformation parameters
+struct TransformParams {
+    float scale_x, scale_y;
+    int offset_x, offset_y;
+    int original_w, original_h;
+    int model_w, model_h;
+};
+
+struct ModelConfig {
+	std::string config_file_path;
+	int infer_width;
+	int infer_height;
+	std::string model_name;
+	std::string model_engine;
+	std::string label_file_path;
+	int batch_size;
+	float confidence_threshold;
+	bool maintain_aspect_ratio;
+	
+	bool is_valid() const {
+		return infer_width > 0 && infer_height > 0;
+	}
+	
+	void print() const {
+		std::cout << "[MODEL CONFIG]\n";
+        std::cout << "  Name: " << model_name << "\n";
+        std::cout << "  Config file: " << config_file_path << "\n";
+        std::cout << "  Engine file: " << model_engine << "\n";
+        std::cout << "  Label file: " << label_file_path << "\n";
+        std::cout << "  Infer dimensions: " << infer_width << "x" << infer_height << "\n";
+        std::cout << "  Batch size: " << batch_size << "\n";
+        std::cout << "  Confidence threshold: " << confidence_threshold << "\n";
+        std::cout << "  Maintain aspect ratio: " << (maintain_aspect_ratio ? "yes" : "no") << "\n";
+	}
+
+};
+
 // define global frame queue from appsink → SLAM worker
 //std::queue<cv::Mat> frameQueue; // image only
 std::deque<FramePacket> g_queue; // image + detections
@@ -79,6 +112,248 @@ std::condition_variable g_cond;
 
 const size_t MAX_QUEUE = 50; // tune down from 1283
 
+// Global model config and transform params
+ModelConfig g_model_config;
+TransformParams g_transform_params;
+
+void calculate_letterbox_params(int src_w, int src_h, 
+                                int dst_w, int dst_h,
+                                TransformParams &params) {
+    float src_aspect = (float)src_w / src_h;
+    float dst_aspect = (float)dst_w / dst_h;
+    
+    params.original_w = src_w;
+    params.original_h = src_h;
+    params.model_w = dst_w;
+    params.model_h = dst_h;
+    
+    if (src_aspect > dst_aspect) {
+        int scaled_h = (int)(dst_w / src_aspect);
+        params.scale_x = (float)src_w / dst_w;
+        params.scale_y = (float)src_h / scaled_h;
+        params.offset_x = 0;
+        params.offset_y = (dst_h - scaled_h) / 2;
+        std::cout << "[TRANSFORM] Letterbox mode (bars top/bottom)\n";
+    } else {
+        int scaled_w = (int)(dst_h * src_aspect);
+        params.scale_x = (float)src_w / scaled_w;
+        params.scale_y = (float)src_h / dst_h;
+        params.offset_x = (dst_w - scaled_w) / 2;
+        params.offset_y = 0;
+        std::cout << "[TRANSFORM] Pillarbox mode (bars left/right)\n";
+    }
+    
+    std::cout << "[TRANSFORM] Source: " << src_w << "x" << src_h 
+              << " -> Model: " << dst_w << "x" << dst_h << "\n";
+    std::cout << "[TRANSFORM] Scale: " << params.scale_x << "x" << params.scale_y 
+              << " Offset: (" << params.offset_x << "," << params.offset_y << ")\n";
+}
+
+void transform_detection(DetectedObject &obj, const TransformParams &params) {
+    float adj_left = obj.left - params.offset_x;
+    float adj_top = obj.top - params.offset_y;
+    
+    obj.left = adj_left * params.scale_x;
+    obj.top = adj_top * params.scale_y;
+    obj.width = obj.width * params.scale_x;
+    obj.height = obj.height * params.scale_y;
+    
+    obj.left = std::max(0.0f, std::min(obj.left, (float)params.original_w - 1));
+    obj.top = std::max(0.0f, std::min(obj.top, (float)params.original_h - 1));
+    obj.width = std::max(1.0f, std::min(obj.width, (float)params.original_w - obj.left));
+    obj.height = std::max(1.0f, std::min(obj.height, (float)params.original_h - obj.top));
+}
+
+// Helper: parse key=value line
+std::pair<std::string, std::string> parse_key_value(const std::string& line) {
+    size_t delim_pos = line.find('=');
+    if (delim_pos == std::string::npos) {
+        delim_pos = line.find(':');
+    }
+    if (delim_pos == std::string::npos) {
+        return {"", ""};
+    }
+    
+    std::string key = line.substr(0, delim_pos);
+    std::string value = line.substr(delim_pos + 1);
+    
+    // Trim whitespace
+    auto trim = [](std::string& s) {
+        s.erase(0, s.find_first_not_of(" \t\r\n"));
+        s.erase(s.find_last_not_of(" \t\r\n") + 1);
+    };
+    
+    trim(key);
+    trim(value);
+    
+    return {key, value};
+}
+
+// Helper: parse "3;512;1384" format
+bool parse_infer_dims(const std::string& value, int& height, int& width) {
+    std::string dims = value;
+    for (char& c : dims) {
+        if (c == ';') c = ' ';
+    }
+    
+    std::istringstream iss(dims);
+    int channels, h, w;
+    
+    if (iss >> channels >> h >> w) {
+        height = h;
+        width = w;
+        return true;
+    }
+    
+    return false;
+}
+
+
+bool load_model_config(const std::string& config_path, ModelConfig& config) {
+    std::ifstream file(config_path);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Could not open config file: " << config_path << "\n";
+        return false;
+    }
+    
+    config.config_file_path = config_path;
+    
+    // Set defaults
+    config.batch_size = 1;
+    config.confidence_threshold = 0.5f;
+    config.maintain_aspect_ratio = true;
+    config.model_name = "Unknown Model";
+    
+    std::string line;
+    bool found_width = false;
+    bool found_height = false;
+    
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#' || line[0] == ';') {
+            continue;
+        }
+        
+        auto [key, value] = parse_key_value(line);
+        if (key.empty()) {
+            continue;
+        }
+        
+        // Parse standard DeepStream parameters
+        if (key == "infer-dims" || key == "network-input-shape") {
+            if (parse_infer_dims(value, config.infer_height, config.infer_width)) {
+                found_width = true;
+                found_height = true;
+                //std::cout << "[CONFIG] Parsed infer-dims: " << config.infer_width 
+                //          << "x" << config.infer_height << "\n";
+            }
+        }
+        else if (key == "model-engine-file" || key == "model-file") {
+            config.model_engine = value;
+            //std::cout << "[CONFIG] Engine file: " << config.model_engine << "\n";
+        }
+        else if (key == "labelfile-path") {
+        	config.label_file_path = value;
+        }
+        else if (key == "batch-size") {
+            try {
+                config.batch_size = std::stoi(value);
+                //std::cout << "[CONFIG] Batch size: " << config.batch_size << "\n";
+            } catch (...) {
+                std::cerr << "[WARN] Invalid batch-size value: " << value << "\n";
+            }
+        }
+        // Parse custom metadata parameters
+        else if (key == "model-name" || key == "model_name") {
+            config.model_name = value;
+            //std::cout << "[CONFIG] Model name: " << config.model_name << "\n";
+        }
+        else if (key == "input-width" || key == "infer_width") {
+            try {
+                config.infer_width = std::stoi(value);
+                found_width = true;
+                //std::cout << "[CONFIG] Input width: " << config.infer_width << "\n";
+            } catch (...) {
+                std::cerr << "[WARN] Invalid input-width value: " << value << "\n";
+            }
+        }
+        else if (key == "input-height" || key == "infer_height") {
+            try {
+                config.infer_height = std::stoi(value);
+                found_height = true;
+                //std::cout << "[CONFIG] Input height: " << config.infer_height << "\n";
+            } catch (...) {
+                std::cerr << "[WARN] Invalid input-height value: " << value << "\n";
+            }
+        }
+        else if (key == "confidence-threshold" || key == "confidence_threshold") {
+            try {
+                config.confidence_threshold = std::stof(value);
+                //std::cout << "[CONFIG] Confidence threshold: " << config.confidence_threshold << "\n";
+            } catch (...) {
+                std::cerr << "[WARN] Invalid confidence-threshold value: " << value << "\n";
+            }
+        }
+        else if (key == "maintain-aspect-ratio" || key == "maintain_aspect_ratio") {
+            std::string v = value;
+            // Convert to lowercase for comparison
+            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+            config.maintain_aspect_ratio = (v == "1" || v == "true" || v == "yes");
+            //std::cout << "[CONFIG] Maintain aspect ratio: " 
+            //          << (config.maintain_aspect_ratio ? "yes" : "no") << "\n";
+        }
+    }
+    
+    file.close();
+    
+    // Validation
+    if (!found_width || !found_height || config.infer_width <= 0 || config.infer_height <= 0) {
+        std::cerr << "[ERROR] Config validation failed:\n";
+        std::cerr << "  Width found: " << found_width << " (value: " << config.infer_width << ")\n";
+        std::cerr << "  Height found: " << found_height << " (value: " << config.infer_height << ")\n";
+        std::cerr << "  Please add either:\n";
+        std::cerr << "    1. infer-dims=3;HEIGHT;WIDTH\n";
+        std::cerr << "    OR\n";
+        std::cerr << "    2. input-width=WIDTH and input-height=HEIGHT\n";
+        return false;
+    }
+    
+    return true;
+}
+
+
+// Helper: detect video dimensions
+bool get_video_dimensions(const std::string& uri, int& width, int& height) {
+    if (uri.find("file://") == 0) {
+        std::string path = uri.substr(7);
+        cv::VideoCapture cap(path);
+        if (cap.isOpened()) {
+            width = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
+            height = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+            cap.release();
+            return (width > 0 && height > 0);
+        }
+    }
+    return false;
+}
+
+// returns value after '=', or empty if no '=' present
+std::string get_value(const std::string& arg)
+{
+    auto pos = arg.find('=');
+    if (pos == std::string::npos) return "";
+    return arg.substr(pos + 1);
+}
+
+bool file_exists(const std::string& path)
+{
+    return std::ifstream(path).good();
+}
+
+
+/*
+	Prob functions
+*/
 
 // (Optional) keep if we still want console logs on the OSD branch
 static GstPadProbeReturn osd_sink_pad_buffer_probe(	GstPad *pad, 
@@ -186,25 +461,39 @@ static GstPadProbeReturn print_meta_probe(GstPad *pad,
 }
 
 static void pad_added_handler(GstElement *src, GstPad *new_pad, gpointer user_data) {
-    GstElement *streammux = (GstElement *)user_data;
+    GstElement *next_element = (GstElement *)user_data;
     static gboolean linked = FALSE;
 
     if (linked) {
-        g_print("Pad already linked, ignoring extra pads\n");
+        g_print("[PAD] Pad already linked, ignoring extra pads\n");
         return;
     }
+    
+    // Check if this is a mux element (needs request pad) or regular element (has static pad)
+    GstPad *sink_pad = NULL;
+	if (GST_IS_ELEMENT(next_element) && gst_element_get_pad_template(next_element, "sink_0")) {
+		// For mux elements, request a pad
+    	sink_pad = gst_element_get_request_pad(next_element, "sink_0");
+		if (!sink_pad) {
+            g_printerr("[PAD] Failed to get request pad sink_0 from %s\n", GST_ELEMENT_NAME(next_element));
+            return;
+        }
 
-    GstPad *sink_pad = gst_element_get_request_pad(streammux, "sink_0");
-    if (!sink_pad) {
-        g_printerr("Failed to get request pad sink_0 from streammux\n");
-        return;
+	} else {
+        // For regular elements, get the static sink pad
+        sink_pad = gst_element_get_static_pad(next_element, "sink");
+        if (!sink_pad) {
+            g_printerr("[PAD] Failed to get static sink pad from %s\n", GST_ELEMENT_NAME(next_element));
+            return;
+        }
     }
 
-    if (gst_pad_link(new_pad, sink_pad) != GST_PAD_LINK_OK) {
-        g_printerr("Failed to link source pad to streammux sink pad\n");
+	GstPadLinkReturn ret = gst_pad_link(new_pad, sink_pad);
+    if (ret != GST_PAD_LINK_OK) {
+        g_printerr("[PAD] Failed to link source pad to %s: %d\n", GST_ELEMENT_NAME(next_element), ret);
     } else {
         linked = TRUE;
-        g_print("Source pad linked to streammux sink pad successfully\n");
+        g_print("[PAD] Source pad linked to %s successfully\n", GST_ELEMENT_NAME(next_element));
     }
 
     gst_object_unref(sink_pad);
@@ -243,22 +532,24 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     create_params.height = src_surf->surfaceList[0].height;
     create_params.colorFormat = src_surf->surfaceList[0].colorFormat;
     create_params.layout = NVBUF_LAYOUT_PITCH;
+    create_params.isContiguous = 1; // help mapping
     
-    // KEY FIX: Use NVBUF_MEM_SURFACE_ARRAY for Jetson instead of NVBUF_MEM_CUDA_UNIFIED
+    // Use host-pinned memory on x86 (reliable for SyncForCpu). On Jetson, surface_array is OK,
+    // but pinned also works and is often more straightforward to map for CPU.
     #ifdef __aarch64__
-        // Jetson (ARM64) - use surface array
+        // For Jetson prefer SURFACE_ARRAY (keeps compatibility), but pinned is fine too.
         create_params.memType = NVBUF_MEM_SURFACE_ARRAY;
     #else
-        // x86_64 PC - unified memory works
-        create_params.memType = NVBUF_MEM_CUDA_UNIFIED;
+        // For x86 use pinned host memory to ensure SyncForCpu/map works.
+        create_params.memType = NVBUF_MEM_CUDA_PINNED;
     #endif
 
     if (NvBufSurfaceCreate(&dst_surf, 1, &create_params) != 0) {
-        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceCreate failed\n");
+        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceCreate failed (memType=%d)\n", create_params.memType);
         return false;
     }
 
-    // Configure transform session
+    // Setup transform session (per docs)
     NvBufSurfTransformConfigParams config_params;
     memset(&config_params, 0, sizeof(config_params));
     config_params.compute_mode = NvBufSurfTransformCompute_Default;
@@ -268,63 +559,117 @@ static bool copyNvToCpuAndMakeBGR(NvBufSurface *src_surf, cv::Mat &bgr) {
     NvBufSurfTransformParams xform_params;
     memset(&xform_params, 0, sizeof(xform_params));
     xform_params.transform_flag = NVBUFSURF_TRANSFORM_FILTER;
-    xform_params.transform_filter = NvBufSurfTransformInter_Default;
+    xform_params.transform_filter = NvBufSurfTransformInter_Algo2; // good default
 
-    // Perform GPU → CPU transform
     if (NvBufSurfTransform(src_surf, dst_surf, &xform_params) != 0) {
         g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfTransform failed\n");
         NvBufSurfaceDestroy(dst_surf);
         return false;
     }
 
-    // Map the destination (CPU) buffer FIRST
-    if (NvBufSurfaceMap(dst_surf, 0, 0, NVBUF_MAP_READ) != 0) {
-        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceMap failed (dst)\n");
-        NvBufSurfaceDestroy(dst_surf);
-        return false;
-    }
+    // Try mapping + sync on dst
+    bool success = false;
+    if (NvBufSurfaceMap(dst_surf, 0, 0, NVBUF_MAP_READ) == 0) {
+        // On many platforms, SyncForCpu is required for device/unified memory.
+        #ifndef __aarch64__
+        if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
+            g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceSyncForCpu failed (dst)\n");
+            // don't unmap yet, but try using mappedAddr or dataPtr fallback below, instead
+        }
+        #endif
 
-    // Sync the surface data AFTER mapping (may not be needed on all platforms)
-    #ifndef __aarch64__
-    if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
-        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceSyncForCpu failed\n");
+        NvBufSurfaceParams *params = &dst_surf->surfaceList[0];
+
+        // Prefer mappedAddr, fallback to dataPtr
+        uint8_t *y_data = (uint8_t *) (params->mappedAddr.addr[0] ? params->mappedAddr.addr[0] : params->dataPtr);
+        if (!y_data) {
+            g_printerr("[copyNvToCpuAndMakeBGR] NULL Y data pointer after map\n");
+        } else {
+            // Calculate UV offset robustly using pitch
+            uint8_t *uv_data = y_data + (params->pitch * params->height);
+
+            try {
+                cv::Mat y(params->height, params->width, CV_8UC1, y_data, params->pitch);
+                cv::Mat uv(params->height / 2, params->width / 2, CV_8UC2, uv_data, params->pitch);
+
+                cv::Mat nv12(params->height + params->height / 2, params->width, CV_8UC1);
+                y.copyTo(nv12(cv::Rect(0, 0, params->width, params->height)));
+                cv::Mat uv_single = uv.reshape(1, params->height / 2);
+                uv_single.copyTo(nv12(cv::Rect(0, params->height, params->width, params->height / 2)));
+
+                cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+                success = !bgr.empty();
+            } catch (const cv::Exception &e) {
+                g_printerr("[copyNvToCpuAndMakeBGR] OpenCV exception: %s\n", e.what());
+            }
+        }
+
         NvBufSurfaceUnMap(dst_surf, 0, 0);
-        NvBufSurfaceDestroy(dst_surf);
-        return false;
+    } else {
+        g_printerr("[copyNvToCpuAndMakeBGR] NvBufSurfaceMap failed on dst surface\n");
     }
-    #endif
 
-    NvBufSurfaceParams *params = &dst_surf->surfaceList[0];
-
-    // Get Y and UV plane data
-    uint8_t *y_data = (uint8_t *)params->mappedAddr.addr[0];
-    if (!y_data) {
-        g_printerr("[copyNvToCpuAndMakeBGR] NULL Y data pointer\n");
-        NvBufSurfaceUnMap(dst_surf, 0, 0);
+    // If initial attempt failed, try a fallback: allocate unified memory and transform again
+    if (!success) {
+        g_printerr("[copyNvToCpuAndMakeBGR] Primary copy failed, attempting fallback with CUDA_UNIFIED\n");
         NvBufSurfaceDestroy(dst_surf);
-        return false;
+        memset(&create_params, 0, sizeof(create_params));
+        create_params.gpuId = src_surf->gpuId;
+        create_params.width = src_surf->surfaceList[0].width;
+        create_params.height = src_surf->surfaceList[0].height;
+        create_params.colorFormat = src_surf->surfaceList[0].colorFormat;
+        create_params.layout = NVBUF_LAYOUT_PITCH;
+        create_params.isContiguous = 1;
+        create_params.memType = NVBUF_MEM_CUDA_UNIFIED;
+
+        if (NvBufSurfaceCreate(&dst_surf, 1, &create_params) != 0) {
+            g_printerr("[copyNvToCpuAndMakeBGR] Fallback NvBufSurfaceCreate failed\n");
+            return false;
+        }
+
+        if (NvBufSurfTransform(src_surf, dst_surf, &xform_params) != 0) {
+            g_printerr("[copyNvToCpuAndMakeBGR] Fallback NvBufSurfTransform failed\n");
+            NvBufSurfaceDestroy(dst_surf);
+            return false;
+        }
+
+        if (NvBufSurfaceMap(dst_surf, 0, 0, NVBUF_MAP_READ) == 0) {
+            // try sync again
+            if (NvBufSurfaceSyncForCpu(dst_surf, 0, 0) != 0) {
+                g_printerr("[copyNvToCpuAndMakeBGR] Fallback NvBufSurfaceSyncForCpu failed\n");
+            }
+            NvBufSurfaceParams *params = &dst_surf->surfaceList[0];
+            uint8_t *y_data = (uint8_t *) (params->mappedAddr.addr[0] ? params->mappedAddr.addr[0] : params->dataPtr);
+            if (y_data) {
+                uint8_t *uv_data = y_data + (params->pitch * params->height);
+                try {
+                    cv::Mat y(params->height, params->width, CV_8UC1, y_data, params->pitch);
+                    cv::Mat uv(params->height / 2, params->width / 2, CV_8UC2, uv_data, params->pitch);
+
+                    cv::Mat nv12(params->height + params->height / 2, params->width, CV_8UC1);
+                    y.copyTo(nv12(cv::Rect(0, 0, params->width, params->height)));
+                    cv::Mat uv_single = uv.reshape(1, params->height / 2);
+                    uv_single.copyTo(nv12(cv::Rect(0, params->height, params->width, params->height / 2)));
+
+                    cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+                    success = !bgr.empty();
+                } catch (const cv::Exception &e) {
+                    g_printerr("[copyNvToCpuAndMakeBGR] OpenCV exception (fallback): %s\n", e.what());
+                }
+            } else {
+                g_printerr("[copyNvToCpuAndMakeBGR] NULL Y pointer in fallback\n");
+            }
+            NvBufSurfaceUnMap(dst_surf, 0, 0);
+        } else {
+            g_printerr("[copyNvToCpuAndMakeBGR] Fallback NvBufSurfaceMap failed\n");
+        }
     }
-    
-    uint8_t *uv_data = y_data + (params->pitch * params->height);
 
-    // Create OpenCV wrappers
-    cv::Mat y(params->height, params->width, CV_8UC1, y_data, params->pitch);
-    cv::Mat uv(params->height / 2, params->width / 2, CV_8UC2, uv_data, params->pitch);
-
-    // Assemble NV12 for OpenCV conversion
-    cv::Mat nv12(params->height + params->height / 2, params->width, CV_8UC1);
-    y.copyTo(nv12(cv::Rect(0, 0, params->width, params->height)));
-    cv::Mat uv_single = uv.reshape(1, params->height / 2);
-    uv_single.copyTo(nv12(cv::Rect(0, params->height, params->width, params->height / 2)));
-
-    // Convert to BGR
-    cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
-
-    // Cleanup
-    NvBufSurfaceUnMap(dst_surf, 0, 0);
     NvBufSurfaceDestroy(dst_surf);
-    
-    return true;
+    if (!success) {
+        g_printerr("[copyNvToCpuAndMakeBGR] All attempts failed\n");
+    }
+    return success;
 }
 
 /* Appsink callback: grab frame + NvDs metadata
@@ -658,7 +1003,6 @@ static gboolean bus_warning_callback(GstBus *bus, GstMessage *msg, gpointer data
     return FALSE;  // Remove from event loop
 }
 
-
 // prints long help
 void print_readme() {
     std::ifstream f("README.md");
@@ -681,66 +1025,169 @@ void print_help() {
     "  --log_to_file     Save logs to file\n";
 }
 
+void print_usage() 
+{
+    std::cerr << R"(
+usage
+    deepstream-orbslam <options>
+    deepstream-orbslam <uri> <settings> [options]
+
+unnamed options
+    uri                  is the URI of the camera to use, e,g, file:///path/to/video.mp4
+	settings             is the settings file for the tracker (must be in the YAML format)
+
+options
+	-c,--config=<path>   path to the settings file for the tracker (default: /usr/local/etc/misssys/platforms/self/imaging/model/config_infer_primary_detr.txt)
+    -h,--help            print help and exit
+	--no-stdout          do not output to stdout. @TARIQ, use this instead of -l,--logging
+    -v,--verbose         verbose output
+	--vocabulary=<path>  path to the ORB vocabulary file (default: /usr/local/share/orbslam3/Vocabulary/ORBvoc.txt)
+
+description
+    This application is a pipeline for running a camera, tracking objects and running ORB-SLAM3.
+
+)" << std::endl;
+}
 
 // Usage: deepstream-orbslam <uri> <ORBvoc.txt> <settings.yaml> <config_infer_primary_detr.txt>
+// deepstream-orbslam file:///home/aspen/Downloads/vulcan.mp4 /home/aspen/src/orbslam3/configs/obselete/vulcan.yaml --config=/home/aspen/src/ms-common/slam/orbslam3/applications/config_infer_primary_detr.txt
 int main(int argc, char *argv[]) {
 
 	// No arguments at all
-    if (argc < 1) {
-        print_help();
+    if (argc < 2) {
+        print_usage();
         return 1;
     }
     
 	// Defaults
+	std::string vocabulary = "ORBvoc.txt";
+    std::string config     = "config_pgie_detr_pcc5_res101.txt";
     bool headless = false;
-    bool orbslam = false;
+    bool orbslam = true;
     bool verbose = false;
+
+	std::string vocabulary_override;
+    std::string config_override;
+	std::vector<std::string> positional;
     
     // Parse arguments
-    std::vector<std::string> positional_args;
 	for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-		if (arg=="-h" || arg=="--h") {
-			print_help();
-			return 0;
+		if (arg=="-h" || arg=="--help") {
+            print_usage();
+            return 0;
+        }
+
+		// Flags
+		else if (arg=="--headless") { headless = true; }
+		else if (arg=="-v" || arg=="--verbose") { verbose = true; }
+		
+		// Named options with =value
+		else if (arg.rfind("--vocabulary=") == 0) {
+			vocabulary_override = get_value(arg);
 		}
-		else if (arg=="-help" || arg=="--help") {
-			print_readme();
-			return 0;
+		else if (arg.rfind("-c") == 0 || arg.rfind("--config=") == 0){
+			config_override = get_value(arg);
 		}
-		else if (arg=="--headless") {
-			headless = true;
-		}
-		else if (arg=="--orbslam") {
-			orbslam = true;
-		}
-		else if (arg=="--verbose") {
-			verbose = true;
-		} else {
-            positional_args.push_back(arg);
+
+		// Positional arguments
+		else {
+            positional.push_back(arg);
         }
 	}
 	
-	if (positional_args.size() < 3) {
-        std::cerr << "ERROR: Missing required arguments.\n";
-        print_help();
+	if (positional.size() < 2) {
+        std::cerr << "ERROR: missing <uri> <settings>\n";
+        print_usage();
         return 1;
     }
     
     // Assign positional arguments
-    std::string uri      = positional_args[0];
-    std::string vocfile  = positional_args[1];
-    std::string settings = positional_args[2];
+    std::string uri      = positional[0];  // MP4
+    std::string settings = positional[1];  // YAML
 
-    std::cout << "[INFO] URI: "      << uri      << "\n";
-    std::cout << "[INFO] VOC: "      << vocfile  << "\n";
-    std::cout << "[INFO] Settings: " << settings << "\n";
+	// Override config
+	if (!config_override.empty()) {
+		config = config_override;
+	}
 
-    std::cout << "[INFO] headless:    " << headless    << "\n";
-    std::cout << "[INFO] orbslam:     " << orbslam     << "\n";
-    std::cout << "[INFO] log_to_file: " << verbose << "\n";
+	// Override vocabulary
+	if (!vocabulary_override.empty()) {
+		vocabulary = vocabulary_override;
+	}
+
+    // Validate files
+    if (uri.rfind("file://", 0) == 0) {
+        std::string path = uri.substr(7);
+        if (!file_exists(path)) {
+            std::cerr << "URI file not found: " << path << "\n";
+            return 1;
+        }
+    }
+    if (!file_exists(vocabulary)) {
+        std::cerr << "Vocabulary file not found: " << vocabulary << "\n";
+        return 1;
+    }
+    if (!file_exists(settings)) {
+        std::cerr << "Settings file not found: " << settings << "\n";
+        return 1;
+    }
+    if (!file_exists(config)) {
+        std::cerr << "Config file not found: " << config << "\n";
+        return 1;
+    }
+    
+	std::cout << "[ORBSLAM]"      << "\n";
+    std::cout << "  uri:        " << uri << "\n";
+    std::cout << "  settings:   " << settings << "\n";
+    std::cout << "  vocabulary: " << vocabulary << "\n";
+    std::cout << "  config:     " << config << "\n";
+    std::cout << "  headless:   " << (headless ? "true" : "false") << "\n";
+    std::cout << "  verbose:    " << (verbose ? "true" : "false") << "\n";
+	//std::cout << "  Using resolution: " << height << "x" << width << "\n";
+
+	// Load model configuration
+	std::cout << "[INFO] Loading model configuration...\n";
+	if (!load_model_config(config, g_model_config)) {
+        std::cerr << "[ERROR] Failed to load model configuration\n";
+        return 1;
+    }
 	
-	std::cout << "[INFO] Running in " << (headless ? "HEADLESS" : "DISPLAY") << " mode.\n";
+	g_model_config.print();
+	
+	//return 1;
+	
+    // Detect video dimensions
+    int video_width = 0, video_height = 0;
+    if (get_video_dimensions(uri, video_width, video_height)) {
+        std::cout << "[INFO] Detected video dimensions: " 
+                  << video_width << "x" << video_height << "\n";
+    } else {
+        std::cout << "[INFO] Could not detect video dimensions, using model input size\n";
+        video_width = g_model_config.infer_width;
+        video_height = g_model_config.infer_height;
+    }
+    
+	//return 1;
+    
+    // Calculate coordinate transformation parameters
+    if (g_model_config.maintain_aspect_ratio) {
+        calculate_letterbox_params(video_width, video_height,
+                                   g_model_config.infer_width, g_model_config.infer_height,
+                                   g_transform_params);
+    } else {
+        // Simple stretch - no transformation needed
+        g_transform_params.scale_x = (float)video_width / g_model_config.infer_width;
+        g_transform_params.scale_y = (float)video_height / g_model_config.infer_height;
+        g_transform_params.offset_x = 0;
+        g_transform_params.offset_y = 0;
+        g_transform_params.original_w = video_width;
+        g_transform_params.original_h = video_height;
+        g_transform_params.model_w = g_model_config.infer_width;
+        g_transform_params.model_h = g_model_config.infer_height;
+    }
+    
+    //return 1;
     
     /* Check if tracker library exists
     */
@@ -763,7 +1210,24 @@ int main(int argc, char *argv[]) {
 	}
 	
 	/* Initializes the GStreamer library */
-    gst_init(&argc, &argv);
+    gst_init(nullptr, nullptr);
+    
+    /* Initialize CUDA */
+    cudaError_t cuda_err = cudaSetDevice(0);
+    if (cuda_err != cudaSuccess) {
+        g_printerr("[ERROR] Failed to set CUDA device 0: %s\n", 
+                   cudaGetErrorString(cuda_err));
+        g_printerr("[INFO] Available GPUs:\n");
+        int deviceCount = 0;
+        cudaGetDeviceCount(&deviceCount);
+        for (int i = 0; i < deviceCount; i++) {
+            cudaDeviceProp prop;
+            cudaGetDeviceProperties(&prop, i);
+            g_print("  GPU %d: %s\n", i, prop.name);
+        }
+        return -1;
+    }
+    g_print("[INFO] CUDA device 0 initialized successfully\n");
     
     /* Create the empty pipeline */
 	GstElement *pipeline  = gst_pipeline_new("deepstream-pipeline");
@@ -773,32 +1237,56 @@ int main(int argc, char *argv[]) {
 		Basic object detection and tracking branch
     */
     GstElement *source    = gst_element_factory_make("uridecodebin", "src");
-    // → we can insert a preprocessing step here
+    GstElement *nvvidconv_pre = gst_element_factory_make("nvvideoconvert", "nvvidconv_pre");
+    GstElement *capsfilter_pre = gst_element_factory_make("capsfilter", "capsfilter_pre");
     GstElement *streammux = gst_element_factory_make("nvstreammux", "streammux");
     GstElement *pgie      = gst_element_factory_make("nvinfer", "pgie");
+    if (!pgie) {
+    	g_printerr("Failed to create pgie element\n");
+    	return -1;
+	}
     GstElement *tracker   = gst_element_factory_make("nvtracker", "tracker");
     GstElement *nvvidconv = gst_element_factory_make("nvvideoconvert", "nvvidconv");
     
-    if (!pipeline || !source || !streammux || !pgie || !tracker || !nvvidconv) {
-        g_printerr ("Failed to create an essential pipeline element.");
+    if (!pipeline || !source || !nvvidconv_pre || !capsfilter_pre || 
+        !streammux || !pgie || !tracker || !nvvidconv) {
+        g_printerr("Failed to create essential pipeline elements\n");
         return -1;
     }
     
-	g_object_set(G_OBJECT(source), "uri", argv[1], NULL);
-    g_object_set(G_OBJECT(pgie), "config-file-path", PGIE_CONFIG_FILE, "batch-size", 1, NULL);
-    g_object_set(G_OBJECT(streammux), 
-    			"width", 1280, "height", 720, // 1382 x 512  for kitti dataset, but now it limited
-    			"batch-size", 1,
-    			"batched-push-timeout", 40000, NULL);
+    /* Configure elements using model config */
+	g_object_set(G_OBJECT(source), "uri", uri.c_str(), NULL);
+	
+	// Preprocessing: resize to model input dimensions
+    GstCaps *pre_caps = gst_caps_from_string("video/x-raw(memory:NVMM)");
+	gst_caps_set_simple(pre_caps,
+		"width", G_TYPE_INT, g_model_config.infer_width,
+		"height", G_TYPE_INT, g_model_config.infer_height,
+		NULL);
+    g_object_set(G_OBJECT(capsfilter_pre), "caps", pre_caps, NULL);
+    gst_caps_unref(pre_caps);
+    
+    g_object_set(G_OBJECT(streammux),
+        "width", g_model_config.infer_width,
+        "height", g_model_config.infer_height,
+        "batch-size", g_model_config.batch_size,
+        "batched-push-timeout", 40000,
+        NULL);
+		
+    g_object_set(G_OBJECT(pgie),
+        "config-file-path", config.c_str(),
+        "batch-size", g_model_config.batch_size,
+        NULL);
+
 	g_object_set(G_OBJECT(tracker),
-				"tracker-width", 640,  // Match streammux width
-				"tracker-height", 384,  // Match streammux height
-				"ll-lib-file", "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
-				"ll-config-file", "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_IOU.yml",
-				"enable-batch-process", TRUE,
-				"gpu-id", 0,
-				"enable-past-frame", TRUE,
-				NULL);
+        "tracker-width", 640, // g_model_config.infer_width,  // 640
+        "tracker-height", 384, // g_model_config.infer_height,  // 384
+        "ll-lib-file", "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
+        "ll-config-file", "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_IOU.yml",
+        "enable-batch-process", TRUE,
+        "gpu-id", 0,
+        "enable-past-frame", TRUE,
+        NULL);
     g_print("Tracker element created successfully\n");
     
     
@@ -871,7 +1359,7 @@ int main(int argc, char *argv[]) {
              NULL);
 		g_object_set(G_OBJECT(queue_app), "leaky", 2, "max-size-buffers", 1, NULL);
 		
-		GstCaps *caps = gst_caps_from_string("video/x-raw(memory:NVMM)");
+		GstCaps *caps = gst_caps_from_string("video/x-raw(memory:NVMM)"); //, format=NV12");
 		//GstCaps *caps = gst_caps_from_string("video/x-raw, format=RGBA, memory=CPU");
 		//GstCaps *caps = gst_caps_from_string("video/x-raw(memory:SystemMemory),format=NV12");
 		g_object_set(G_OBJECT(capsfilter_app), "caps", caps, NULL);
@@ -907,25 +1395,30 @@ int main(int argc, char *argv[]) {
     if (orbslam) {
 		if (headless) {
 			gst_bin_add_many(GST_BIN(pipeline),
-				             source, streammux, pgie, tracker, nvvidconv,
-				             tee,
-				             queue_osd, nvvidconv_osd, sink,          // no nvosd here
-				             queue_app, nvvidconv_app, capsfilter_app, appsink,
-				             NULL);
+							source, nvvidconv_pre, capsfilter_pre, streammux,
+                         	pgie, tracker, nvvidconv,
+                         	tee,
+                         	queue_osd, nvvidconv_osd, sink, // no nvosd here
+                         	queue_app, nvvidconv_app, capsfilter_app, appsink,
+                         	NULL);
 		} else {
 			gst_bin_add_many(GST_BIN(pipeline),
-				             source, streammux, pgie, tracker, nvvidconv,
-				             tee,
-				             queue_osd, nvvidconv_osd, nvosd, sink,  // include nvosd for display
-				             queue_app, nvvidconv_app, capsfilter_app, appsink,
-				             NULL);
+							source, nvvidconv_pre, capsfilter_pre, streammux,
+                         	pgie, tracker, nvvidconv,
+                         	tee,
+                         	queue_osd, nvvidconv_osd, nvosd, sink,
+                         	queue_app, nvvidconv_app, capsfilter_app, appsink,
+                        	 NULL);
 		}
     } else {
 		gst_bin_add_many(GST_BIN(pipeline),
-					source, streammux, pgie, tracker, nvvidconv, 
+					source, nvvidconv_pre, capsfilter_pre, streammux,
+					pgie, tracker, nvvidconv, 
 					nvosd, sink,
 					NULL);
     }
+    
+    //return 1;
 
 	/* Attempts to link each element’s src pad to the next element’s sink pad in order
     streammux → pgie → tracker → nvvidconv → nvosd → sink
@@ -936,8 +1429,39 @@ int main(int argc, char *argv[]) {
     
 	/* Hanble dynamic pads
     */
-    g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), streammux);
-    //g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), nvvidconv_pre);
+    
+    //g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), streammux);
+    
+    g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), nvvidconv_pre);
+    
+    // Link the preprocessing chain
+	if (!gst_element_link(nvvidconv_pre, capsfilter_pre)) {
+		g_printerr("[LINK] Failed to link nvvidconv_pre -> capsfilter_pre\n");
+		gst_object_unref(pipeline);
+		return -1;
+	}
+	g_print("[LINK] ✓ nvvidconv_pre -> capsfilter_pre linked\n");
+	
+	// Link capsfilter_pre -> streammux using request pad
+	GstPad *filter_src = gst_element_get_static_pad(capsfilter_pre, "src");
+	GstPad *mux_sink = gst_element_get_request_pad(streammux, "sink_0");
+	if (!filter_src || !mux_sink) {
+		g_printerr("[LINK] Failed to get pads for capsfilter_pre -> streammux\n");
+		if (filter_src) gst_object_unref(filter_src);
+		if (mux_sink) gst_object_unref(mux_sink);
+		return -1;
+	}
+
+	if (gst_pad_link(filter_src, mux_sink) != GST_PAD_LINK_OK) {
+		g_printerr("[LINK] Failed to link capsfilter_pre -> streammux\n");
+		gst_object_unref(filter_src);
+		gst_object_unref(mux_sink);
+		return -1;
+	}
+	g_print("[LINK] ✓ capsfilter_pre -> streammux linked\n");
+	gst_object_unref(filter_src);
+	gst_object_unref(mux_sink);
+
     if (orbslam) {
 		g_signal_connect(appsink, "new-sample", G_CALLBACK(orbslam_handler), NULL); // Orbslam updates
 	}
@@ -1029,22 +1553,22 @@ int main(int argc, char *argv[]) {
 	/* Start playing */
 	GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
 	if (ret == GST_STATE_CHANGE_FAILURE) {
-		g_printerr ("Unable to set the pipeline to the playing state.\n");
-		gst_object_unref (pipeline);
+		g_printerr("Pipeline failed to start (PGIE init likely failed)\n");
+		gst_object_unref(pipeline);
 		return -1;
 	}
 	
 	GstState state;
 	gst_element_get_state(pipeline, &state, NULL, 5 * GST_SECOND);
 	g_print("Pipeline state: %d\n", state);
-    
+	 
     
     /*Orbslam
     */
     std::cout << "Running DeepStream + ORB-SLAM3 pipeline..." << std::endl;
-    std::cout << argv[2] << std::endl;
-    std::cout << argv[3] << std::endl;
-    ORB_SLAM3::System SLAM(argv[2], argv[3], ORB_SLAM3::System::MONOCULAR, !headless);
+    std::cout << vocabulary << std::endl;
+    std::cout << settings << std::endl;
+    ORB_SLAM3::System SLAM(vocabulary, settings, ORB_SLAM3::System::MONOCULAR, !headless);
     std::thread orbslamThread([&]() {
     	cv::Mat gray; // keep local copies to avoid repeated allocations
 		while (true) {
