@@ -1258,7 +1258,7 @@ int main(int argc, char *argv[]) {
 	g_object_set(G_OBJECT(source), "uri", uri.c_str(), NULL);
 	
 	// Preprocessing: resize to model input dimensions
-    GstCaps *pre_caps = gst_caps_from_string("video/x-raw(memory:NVMM)");
+    GstCaps *pre_caps = gst_caps_from_string("video/x-raw(memory:NVMM), format=NV12, memory:NVBufSurface");
 	gst_caps_set_simple(pre_caps,
 		"width", G_TYPE_INT, g_model_config.infer_width,
 		"height", G_TYPE_INT, g_model_config.infer_height,
@@ -1271,6 +1271,8 @@ int main(int argc, char *argv[]) {
         "height", g_model_config.infer_height,
         "batch-size", g_model_config.batch_size,
         "batched-push-timeout", 40000,
+        "input-meta-queue", FALSE,
+    	"gpu-id", 0,  // Explicit GPU ID
         NULL);
 		
     g_object_set(G_OBJECT(pgie),
@@ -1688,7 +1690,9 @@ int main(int argc, char *argv[]) {
     std::cout << "✓ Queue cleared" << std::endl;
     
     std::cout << "Shutting down ORBSLAM ..." << std::endl;
-    SLAM.Shutdown();
+    if (SLAM.isShutDown() == false) {
+    	SLAM.Shutdown();
+	}
     std::cout << "✓ ORBSLAM shutdown complete" << std::endl;
     
         
@@ -1696,7 +1700,11 @@ int main(int argc, char *argv[]) {
 	// Creating a directory
 	std::cout << "Saving Map data ..." << std::endl;
 	if (mkdir("sparse", 0777) == -1)
-		cerr << "Error :  " << strerror(errno) << endl;
+		if (errno != EEXIST) {
+			cerr << "Error creating directory: " << strerror(errno) << endl;
+    	} else {
+        	cout << "Directory already exists, using it..." << endl;
+    	}
 	else
 		cout << "Directory created";
 	SLAM.WriteCamerasText("sparse/cameras.txt");
