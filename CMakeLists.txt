@@ -146,20 +146,59 @@ target_compile_definitions(deepstream-orbslam PRIVATE
 # DeepStream-only app
 add_executable(deepstream-track track.cpp)
 target_link_libraries(deepstream-track
+    # DeepStream libraries first
     nvds_infercustomparser_detr
     DeepStream::nvdsgst_meta
     DeepStream::nvds_meta
     DeepStream::nvds_infer
     DeepStream::nvbufsurface
     DeepStream::nvbufsurftransform
+    
+    # GStreamer libraries
     ${GST_LIBRARIES}
     ${GST_VIDEO_LIBRARIES}
     ${GST_APP_LIBRARIES}
     ${GLIB_LIBRARIES}
     ${GOBJECT_LIBRARIES}
+    
+    # CUDA
     cudart
+    
+    # OpenCV
+    ${OpenCV_LIBS}
+    
+    # For Kalman Filter
+    Eigen3::Eigen
+)
+
+# DeepStream-only app
+add_executable(deepstream-interpipe-track track_interpipe.cpp)
+target_link_libraries(deepstream-interpipe-track
+    # DeepStream libraries first
+    nvds_infercustomparser_detr
+    DeepStream::nvdsgst_meta
+    DeepStream::nvds_meta
+    DeepStream::nvds_infer
+    DeepStream::nvbufsurface
+    DeepStream::nvbufsurftransform
+    
+    # GStreamer libraries
+    ${GST_LIBRARIES}
+    ${GST_VIDEO_LIBRARIES}
+    ${GST_APP_LIBRARIES}
+    ${GLIB_LIBRARIES}
+    ${GOBJECT_LIBRARIES}
+    
+    # CUDA
+    cudart
+    
+    # OpenCV
+    ${OpenCV_LIBS}
+    
+    # For Kalman Filter
+    Eigen3::Eigen
 )
 
 # Install rule (optional)
-install(TARGETS deepstream-track deepstream-orbslam DESTINATION bin)
+install(TARGETS deepstream-track deepstream-interpipe-track deepstream-orbslam DESTINATION bin)
 

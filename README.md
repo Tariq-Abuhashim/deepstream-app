@@ -121,3 +121,7 @@ $ trtexec --onnx=simplified_detr.onnx --saveEngine=detr.engine --fp16
 	June, 19, 2025, initially implemented as main.cpp
 	August, 26, 2025, initial orbslam updates
 	October, 07, 2025, working orbslam handler (not tested with orbslam)
+
+## Reference:  
+https://missionsystems.atlassian.net/wiki/x/BIBysg
+https://missionsystems.atlassian.net/wiki/x/AYAzww
