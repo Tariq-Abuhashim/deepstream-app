@@ -55,10 +55,10 @@ inline GstPadProbeReturn print_meta_probe(GstPad *pad, GstPadProbeInfo *info, gp
             fflush(stdout);
         }
 
-		std::cerr << "[PROBE] frame=" << fmeta->frame_num 
-				  << " src=" << fmeta->source_id
-				  << " obj_count=" << obj_count
-				  << " batch_meta=" << (batch_meta ? "OK" : "NULL") << "\n";
+		//std::cerr << "[PROBE] frame=" << fmeta->frame_num 
+		//		  << " src=" << fmeta->source_id
+		//		  << " obj_count=" << obj_count
+		//		  << " batch_meta=" << (batch_meta ? "OK" : "NULL") << "\n";
 
         // ---- PRINT TO STDERR (log format) ----
         //std::cerr << "[PROBE][" << (char*)user_data << "] frame#[" << frame_id 

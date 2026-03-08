@@ -216,7 +216,14 @@ int main(int argc, char *argv[]) {
 	GstElement *pipeline  = gst_pipeline_new("deepstream-pipeline");
 
 	/* Element factory 
-    Elements: source, streammux, pgie, tracker, nvvidconv, nvosd and sink 
+    Elements: source, streammux, pgie, tracker, nvvidconv, nvosd and sink
+    nvvidconv_pre + capsfilter_pre — convert the raw source to a format streammux accepts (e.g. force NV12, fix resolution)
+    streammux — package into batched buffer + attach NvDsBatchMeta
+    pgie	  — run inference, outputs NV12 (it's more efficient for inference)
+    tracker   — assign IDs, populate tracking metadata, passes frames through unchanged, still NV12
+    nvvidconv — converts NV12 → RGBA
+    nvosd     — needs RGBA to draw metadata overlays (boxes, labels, etc.) on the frame
+    sink      — display or encode
     */
     GstElement *source = gst_element_factory_make("uridecodebin", "src");
     GstElement *nvvidconv_pre = gst_element_factory_make("nvvideoconvert", "nvvidconv_pre");
@@ -391,7 +398,7 @@ int main(int argc, char *argv[]) {
 	if (!headless) {
 		GstPad *nvvidconv_src_pad = gst_element_get_static_pad(nvvidconv, "src");
 		gst_pad_add_probe(nvvidconv_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
-		                  filtered_display_probe, NULL, NULL);
+		                  filtered_display_probe, NULL, NULL); // includes Kalman filtering
 		gst_object_unref(nvvidconv_src_pad);
 	}
 

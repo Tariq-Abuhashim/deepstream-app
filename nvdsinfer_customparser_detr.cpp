@@ -45,10 +45,10 @@ extern "C" bool NvDsInferParseCustomDETR(
     int num_queries = logitsLayer->inferDims.d[0];
     int num_classes = logitsLayer->inferDims.d[1];
 
-    if (call_count <= 3) {
+    /*if (call_count <= 3) {
         std::cerr << "[PARSER] num_queries=" << num_queries 
                   << " num_classes=" << num_classes << std::endl;
-    }
+    }*/
 
     // Sanity check
     if (boxesLayer->inferDims.d[0] != num_queries ||
@@ -89,12 +89,14 @@ extern "C" bool NvDsInferParseCustomDETR(
         }
 
         // Print first few detections for debugging
+        /*
         if (call_count <= 3 && i < 5) {
             std::cerr << "[PARSER] Query " << i 
                       << " class=" << maxClass 
                       << " raw_logit=" << maxRawLogit
                       << " prob=" << maxProb << std::endl;
         }
+        */
 
         // Get threshold for this class
         float threshold = (maxClass < detectionParams.numClassesConfigured) 
@@ -132,7 +134,7 @@ extern "C" bool NvDsInferParseCustomDETR(
             }
         }
     }
-
+/*
     if (call_count <= 5) {
         std::cerr << "[PARSER] Frame " << call_count 
                   << " - Found " << detections_found << " detections above threshold " 
@@ -143,6 +145,7 @@ extern "C" bool NvDsInferParseCustomDETR(
                   << " - Max probability (after softmax): " << max_confidence_seen 
                   << " (class " << best_class_seen << ")" << std::endl;
     }
+*/
 
     return true;
 }

@@ -93,10 +93,10 @@ int main(int argc, char* argv[])
 
 	// Defaults
     std::string config = "config_pgie_detr_pcc5_res101.txt";
-    bool headless = false;
-    bool no_stdout = false;
-    bool record = false;
-    bool extract_metadata = false;
+    bool headless = false; // PASS !!
+    bool no_stdout = false; // PASS !!
+    bool record = false; // NOT TESTED !!
+    bool extract_metadata = false; // NOT TESTED !!
     std::string record_file;
     std::string uri;
 
@@ -106,13 +106,15 @@ int main(int argc, char* argv[])
         
         if (arg == "--headless") {
             headless = true;
+        } else if (arg == "--no-stdout") {
+        	no_stdout = true;
+		} else if (arg.rfind("--record=", 0) == 0) {
+            record = true;
+            record_file = get_value(arg);
         } else if (arg == "--metadata") {
             extract_metadata = true;
         } else if (arg.rfind("--config=", 0) == 0) {
             config = get_value(arg);
-        } else if (arg.rfind("--record=", 0) == 0) {
-            record = true;
-            record_file = get_value(arg);
         } else {
             uri = arg;
         }
@@ -267,7 +269,7 @@ int main(int argc, char* argv[])
 	
 	// Attach print_meta_probe to the tracker's src pad
 	GstElement* tracker_elem = gst_bin_get_by_name(GST_BIN(processing), "tracker");
-	if (tracker_elem) {
+	if (tracker_elem && !no_stdout) {
 		GstPad* src_pad = gst_element_get_static_pad(tracker_elem, "src");
 		gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER,
         	print_meta_probe, (gpointer)"tracker_src", NULL);
@@ -299,7 +301,7 @@ int main(int argc, char* argv[])
 			if (osd_sink_pad) {
 				g_print("✓ Found OSD sink pad\n");
 				gulong probe_id = gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                            filtered_display_probe, NULL, NULL);
+                            filtered_display_probe, NULL, NULL); // includes Kalman filtering
                 g_print("✓ Added probe with ID: %lu\n", probe_id);
                 gst_object_unref(osd_sink_pad);
 			} else {
@@ -441,6 +443,7 @@ int main(int argc, char* argv[])
     // registered the watch after the sleep).
 
 	// Add probes to verify data flow into mux
+/*
 	GstElement* proc = tracker.get_pipeline("processing");
 	if (proc) {
 		GstElement* interpipesrc_elem = gst_bin_get_by_name(GST_BIN(proc), "interpipesrc");
@@ -459,6 +462,7 @@ int main(int argc, char* argv[])
 		    gst_object_unref(interpipesrc_elem);
 		}
 	}
+*/
     
     std::cout << "Running DeepStream pipeline...\n";
     std::cout << "Press Ctrl+C to stop\n\n";

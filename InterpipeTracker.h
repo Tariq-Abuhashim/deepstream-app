@@ -300,6 +300,7 @@ public:
         g_print("[LINK] interpipesrc -> nvstreammux sink_0 linked\n");
 
         // Probe to confirm buffers are flowing into the mux
+        /*
         gst_pad_add_probe(mux_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
             [](GstPad*, GstPadProbeInfo*, gpointer) -> GstPadProbeReturn {
                 static int count = 0;
@@ -307,6 +308,7 @@ public:
                     g_print("[PROBE] mux sink_0: %d buffers received\n", count);
                 return GST_PAD_PROBE_OK;
             }, NULL, NULL);
+        */
 
         gst_object_unref(src_pad);
         gst_object_unref(mux_sink_pad);
@@ -342,6 +344,8 @@ public:
         std::string pipe_desc = 
             "interpipesrc name=src listen-to=processing_output"
             " is-live=true stream-sync=0 allow-renegotiation=true ! "
+			"nvvideoconvert ! "
+        	"video/x-raw(memory:NVMM),format=RGBA ! "
             "fakesink name=sink sync=false async=false";
         GstElement* pipeline = create_pipeline(pipe_desc);
         if (pipeline) g_print("Created headless pipeline: processing_output → fakesink\n");
