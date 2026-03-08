@@ -127,7 +127,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-	std::cerr << "[ORBSLAM]"      << "\n";
+	std::cerr << "[TRACKER]"      << "\n";
     std::cerr << "  uri:        " << uri << "\n";
     std::cerr << "  config:     " << config << "\n";
     std::cerr << "  headless:   " << (headless ? "true" : "false") << "\n";
@@ -178,6 +178,7 @@ int main(int argc, char *argv[]) {
 		std::cerr << "Tracker library not found: " << tracker_lib << std::endl;
 		std::cerr << "Available tracker libraries:" << std::endl;
 		int status = system("ls -la /opt/nvidia/deepstream/deepstream*/lib/libnvds_mot*");
+		return -1;
 	}
 
 	/* Check if config file exists */
@@ -188,7 +189,7 @@ int main(int argc, char *argv[]) {
 		std::cerr << "Tracker config file not found: " << tracker_config << std::endl;
 		std::cerr << "Available config files:" << std::endl;
 		int status = system("find /opt/nvidia/deepstream -name '*tracker*.yml' -o -name '*tracker*.txt' 2>/dev/null");
-		return -1;  // Exit if config not found
+		return -1;
 	}
 	
 	/* Initializes the GStreamer library */
@@ -235,6 +236,7 @@ int main(int argc, char *argv[]) {
 	g_object_set(G_OBJECT(source), "uri", uri.c_str(), NULL);
 
 	// Preprocessing: resize to model input dimensions
+	// Force NvBufSurface memory type that nvstreammux needs
     GstCaps *pre_caps = gst_caps_from_string("video/x-raw(memory:NVMM), format=NV12, memory:NVBufSurface");
 	gst_caps_set_simple(pre_caps,
 		"width", G_TYPE_INT, g_model_config.infer_width,
@@ -402,6 +404,7 @@ int main(int argc, char *argv[]) {
     gst_bus_timed_pop_filtered blocks forever (GST_CLOCK_TIME_NONE) until:
     An ERROR message arrives
     An EOS (end-of-stream) message arrives
+    Problem: misses other messages
     */
     /* Wait until error or EOS */
     GstBus *bus = gst_element_get_bus(pipeline);
@@ -409,9 +412,10 @@ int main(int argc, char *argv[]) {
 	g_signal_connect(bus, "message::error", G_CALLBACK(bus_error_callback), NULL);
 	g_signal_connect(bus, "message::warning", G_CALLBACK(bus_warning_callback), NULL);
 
+	// gst_bus_timed_pop_filtered is BLOCKING
     GstMessage *msg = gst_bus_timed_pop_filtered(
     		bus, 
-    		GST_CLOCK_TIME_NONE,
+    		GST_CLOCK_TIME_NONE, // = Wait forever until we get ERROR or EOS
             (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS)
     );
     

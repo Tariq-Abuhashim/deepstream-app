@@ -55,6 +55,11 @@ inline GstPadProbeReturn print_meta_probe(GstPad *pad, GstPadProbeInfo *info, gp
             fflush(stdout);
         }
 
+		std::cerr << "[PROBE] frame=" << fmeta->frame_num 
+				  << " src=" << fmeta->source_id
+				  << " obj_count=" << obj_count
+				  << " batch_meta=" << (batch_meta ? "OK" : "NULL") << "\n";
+
         // ---- PRINT TO STDERR (log format) ----
         //std::cerr << "[PROBE][" << (char*)user_data << "] frame#[" << frame_id 
         //          << "] total_objs=[" << obj_count << "]\n";
@@ -260,6 +265,12 @@ NvOSD_RectParams compute_expo_averaged_bbox(const std::deque<NvOSD_RectParams>& 
 
 // Filtered display probe - only show tracked objects
 static GstPadProbeReturn filtered_display_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+
+	static int frame_debug = 0;
+	frame_debug++;
+	if (frame_debug % 30 == 0)
+		g_print("Frame %d processed\n", g_current_frame_num);
+	
 	GstBuffer *buf = (GstBuffer *)info->data;
 	NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buf);
 	if (!batch_meta) {
@@ -272,17 +283,26 @@ static GstPadProbeReturn filtered_display_probe(GstPad *pad, GstPadProbeInfo *in
     	NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)(l_frame->data);
     	g_current_frame_num = frame_meta->frame_num;
     	
-    	// Predict step for all existing tracks
+    	// FIX #4: Only predict for tracks that have been seen at least once
+    	// (frame_count > 0). Calling predict() on a default-constructed
+    	// KalmanFilter before any update() has been called reads uninitialized
+    	// state matrices, producing garbage bboxes or a crash that silently
+    	// kills the pipeline.
     	for (auto& pair : g_object_histories) {
-    		pair.second.kf.predict(); // predict where the bbox should be in the current image
+    		if (pair.second.frame_count > 0) {
+    			pair.second.kf.predict();
+    		}
     	}
     	
     	// Update histories with current detections
     	// First pass, set all visible objects as TRUE and update
     	for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next){
     		NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)(l_obj->data);
-    		guint64 obj_id = obj_meta->object_id;
     		
+    		//if (obj_meta->object_id == UNTRACKED_OBJECT_ID)
+    		//	continue;
+    			
+    		guint64 obj_id = obj_meta->object_id;
     		BBoxHistory &history = g_object_histories[obj_id];
     		
     		// Update Kalman filter with new measurement
@@ -317,11 +337,22 @@ static GstPadProbeReturn filtered_display_probe(GstPad *pad, GstPadProbeInfo *in
             guint64 obj_id = obj_meta->object_id;
             BBoxHistory &history = g_object_histories[obj_id];
             
-            if (history.frame_count < MIN_FRAMES_TO_DISPLAY) {
+            if (false) {  //(history.frame_count < MIN_FRAMES_TO_DISPLAY) {
                 // Don't display this object
                 nvds_remove_obj_meta_from_frame(frame_meta, obj_meta);
             } else {
-				// Get Kalman-filtered bbox
+				// FIX #4: Only apply Kalman bbox if the filter has been
+				// properly initialized (frame_count > 0 guarantees at least
+				// one update() call has been made before getBBox() is used).
+				if (history.frame_count > 0) {
+					auto bbox = history.kf.getBBox();
+					if (bbox.width > 0 && bbox.height > 0) {
+						obj_meta->rect_params = bbox;
+					} else {
+						g_print("Invalid Kalman bbox for obj %lu, keeping raw detection\n",
+						        (unsigned long)obj_id);
+					}
+				}
 				obj_meta->rect_params = history.kf.getBBox();
 				//NvOSD_RectParams filtered_bbox = history.kf.getBBox();
 				
@@ -348,10 +379,7 @@ static GstPadProbeReturn filtered_display_probe(GstPad *pad, GstPadProbeInfo *in
         }
         
         // Clean up old tracks
-        for (auto it = g_object_histories.begin(); it != g_object_histories.end();) {
-            guint64 obj_id = it->first;
-            BBoxHistory &history = it->second;
-			
+        for (auto it = g_object_histories.begin(); it != g_object_histories.end();) {			
             if (it->second.kf.getAge() >= FRAMES_BEFORE_REMOVAL) {
                 it = g_object_histories.erase(it);
             } else {

@@ -11,13 +11,16 @@
 
 // Helper: Get value after '=' in argument
 inline std::string get_value(const std::string& arg) {
-    auto pos = arg.find('=');
-    if (pos == std::string::npos) return "";
-    return arg.substr(pos + 1);
+	size_t pos = arg.find('=');
+	if (pos != std::string::npos) {
+		return arg.substr(pos + 1);
+	}
+	return "";
 }
 // Helper: Check if file exists
 inline bool file_exists(const std::string& path) {
-    return std::ifstream(path).good();
+    std::ifstream file(path);
+    return file.good();
 }
 
 // Helper: Parse key=value line
