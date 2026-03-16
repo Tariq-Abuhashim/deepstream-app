@@ -167,3 +167,46 @@ inline bool get_video_dimensions(const std::string& uri, int& width, int& height
     return false;
 }
 
+
+// Return true when the argument looks like a V4L2 device path (/dev/videoN)
+// or a bare device node (e.g. /dev/video0, /dev/v4l/by-id/...).
+inline bool is_camera_device(const std::string& arg) {
+    return arg.rfind("/dev/", 0) == 0;
+}
+
+
+// Helper: Detect video dimensions from Camera
+// setup minimal camera input pipeline, the read the sink caps
+inline bool get_camera_dimensions(const std::string& device, int& width, int& height) {
+	std::string desc = "v4l2src device=" + device + " ! videoconvert ! fakesink name=sink";
+	GError* err = nullptr;
+	GstElement* pipe = gst_parse_launch(desc.c_str(), &err);
+	if (!pipe || err) {
+		g_printerr("Failed to get camera dimensions: %s\n", err->message);
+		g_clear_error(&err);
+		return false;
+	}
+	
+	// Pause to trigger caps negotiation
+	gst_element_set_state(pipe, GST_STATE_PAUSED);
+	gst_element_get_state(pipe, nullptr, nullptr, 5*GST_SECOND);
+	
+	GstElement* sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
+	GstPad* pad = gst_element_get_static_pad(sink, "sink");
+	GstCaps* caps = gst_pad_get_current_caps(pad);
+	bool ok = false;
+	if (caps) {
+		GstStructure* s = gst_caps_get_structure(caps, 0);
+		ok= gst_structure_get_int(s, "width",	&width)
+		&&	gst_structure_get_int(s, "height",	&height);
+	}
+	
+	gst_object_unref(pad);
+	gst_object_unref(sink);
+	gst_element_set_state(pipe, GST_STATE_NULL);
+	gst_object_unref(pipe);
+	//g_usleep(200000);
+	return ok;
+}
+
+

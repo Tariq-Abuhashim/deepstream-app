@@ -159,29 +159,53 @@ inline void pad_added_handler(GstElement *src, GstPad *new_pad, gpointer user_da
     gst_object_unref(sink_pad);
 }
 
-// Bus callbacks
-inline gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
+// Unified bus callback — handles EOS, errors, warnings, and state changes.
+// Pass a GMainLoop* as user_data to quit on EOS or error.
+inline gboolean bus_callback(GstBus* /*bus*/, GstMessage* msg, gpointer data) {
+    GMainLoop* loop = static_cast<GMainLoop*>(data);
+
     switch (GST_MESSAGE_TYPE(msg)) {
+
+        case GST_MESSAGE_EOS:
+            g_printerr("[BUS] EOS from %s — done\n", GST_OBJECT_NAME(msg->src));
+            if (loop) g_main_loop_quit(loop);
+            break;
+
         case GST_MESSAGE_ERROR: {
-            GError *err;
-            gchar *debug;
-            gst_message_parse_error(msg, &err, &debug);
-            std::cerr << "Error: " << err->message << "\n";
-            if (debug) std::cerr << "Debug: " << debug << "\n";
-            g_error_free(err);
-            g_free(debug);
+            GError* err; gchar* dbg;
+            gst_message_parse_error(msg, &err, &dbg);
+            g_printerr("[BUS] ERROR from %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
+            if (dbg) g_printerr("[BUS] Debug: %s\n", dbg);
+            g_clear_error(&err); g_free(dbg);
+            if (loop) g_main_loop_quit(loop);
             break;
         }
+
         case GST_MESSAGE_WARNING: {
-            GError *err;
-            gchar *debug;
-            gst_message_parse_warning(msg, &err, &debug);
-            std::cerr << "Warning: " << err->message << "\n";
-            if (debug) std::cerr << "Debug: " << debug << "\n";
-            g_error_free(err);
-            g_free(debug);
+            GError* err; gchar* dbg;
+            gst_message_parse_warning(msg, &err, &dbg);  // use parse_warning, not parse_error
+            g_printerr("[BUS] WARNING from %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
+            if (dbg) g_printerr("[BUS] Debug: %s\n", dbg);
+            g_clear_error(&err); g_free(dbg);
             break;
         }
+
+        case GST_MESSAGE_STATE_CHANGED: {
+            // Only log pipeline-level state changes, not every element
+            if (GST_IS_PIPELINE(GST_MESSAGE_SRC(msg))) {
+                GstState old_s, new_s, pending;
+                gst_message_parse_state_changed(msg, &old_s, &new_s, &pending);
+                g_printerr("[BUS] %s state: %s → %s%s\n",
+                    GST_OBJECT_NAME(msg->src),
+                    gst_element_state_get_name(old_s),
+                    gst_element_state_get_name(new_s),
+                    pending != GST_STATE_VOID_PENDING
+                        ? (std::string(" (pending: ") + gst_element_state_get_name(pending) + ")").c_str()
+                        : "");
+            }
+            break;
+        }
+
         default:
             break;
     }

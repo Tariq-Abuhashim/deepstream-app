@@ -59,20 +59,10 @@ void signal_handler(int signum) {
     }
 }
 
-// Metadata callback for tracking
-static GstFlowReturn metadata_callback(GstElement* sink, gpointer user_data) {
-	GstSample* sample = nullptr;
-	g_signal_emit_by_name(sink, "pull-sample", &sample);
-	if (sample) {
-		GstBuffer* buffer = gst_sample_get_buffer(sample);
-		NvDsBatchMeta* batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
-		if (batch_meta) {
-			// meta data processing logic
-		}
-		gst_sample_unref(sample);
-	}
-	return GST_FLOW_OK;
-}
+// Output bus watch
+const std::set<std::string> InterpipeTracker::OUTPUT_NAMES = {
+    "display", "headless", "recorder", "metadata"
+};
 
 int main(int argc, char* argv[]) 
 {
@@ -294,22 +284,19 @@ int main(int argc, char* argv[])
 		tracker.add_pipeline("display", display);
 		
 		// Add filtered display probe
-		GstElement* osd = gst_bin_get_by_name(GST_BIN(display), "osd");
-		if (osd) {
-			g_print("✓ Found OSD element\n");
-			GstPad* osd_sink_pad = gst_element_get_static_pad(osd, "sink");
-			if (osd_sink_pad) {
-				g_print("✓ Found OSD sink pad\n");
-				gulong probe_id = gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
+		GstElement* conv_elem = gst_bin_get_by_name(GST_BIN(processing), "nvvidconv");
+		if (conv_elem) {
+			GstPad* conv_src_pad = gst_element_get_static_pad(conv_elem, "src");
+			if (conv_src_pad) {
+				gulong probe_id = gst_pad_add_probe(conv_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
                             filtered_display_probe, NULL, NULL); // includes Kalman filtering
-                g_print("✓ Added probe with ID: %lu\n", probe_id);
-                gst_object_unref(osd_sink_pad);
+                gst_object_unref(conv_src_pad);
 			} else {
-				g_print("✗ Could not get OSD sink pad\n");
+				g_print("✗ Could not get nvvidconv src pad\n");
 			}
-			gst_object_unref(osd);
+			gst_object_unref(conv_elem);
 		} else {
-			g_print("✗ Could not find OSD element in display pipeline\n");
+			g_print("✗ Could not find nvvidconv element in pipeline\n");
 		}
 	}
 
@@ -321,10 +308,50 @@ int main(int argc, char* argv[])
 			return -1;
 		}
 		tracker.add_pipeline("recorder", recorder);
+		
+GstElement* rec_src = gst_bin_get_by_name(GST_BIN(recorder), "src");
+if (rec_src) {
+    GstPad* p = gst_element_get_static_pad(rec_src, "src");
+    gst_pad_add_probe(p, GST_PAD_PROBE_TYPE_BUFFER,
+        [](GstPad*, GstPadProbeInfo*, gpointer) -> GstPadProbeReturn {
+            static int n = 0;
+            if (++n == 1) g_printerr("[PROBE] recorder interpipesrc: FIRST buffer\n");
+            if (n % 30 == 0) g_printerr("[PROBE] recorder interpipesrc: %d buffers\n", n);
+            return GST_PAD_PROBE_OK;
+        }, NULL, NULL);
+    gst_object_unref(p);
+    gst_object_unref(rec_src);
+}
+
+g_timeout_add(3000, [](gpointer data) -> gboolean {
+    GstElement* rec = static_cast<GstElement*>(data);
+    GstState state, pending;
+    gst_element_get_state(rec, &state, &pending, 0);
+    g_printerr("[RECORDER] state=%s pending=%s\n",
+        gst_element_state_get_name(state),
+        gst_element_state_get_name(pending));
+
+    // Walk all elements and print their state
+    GstIterator* it = gst_bin_iterate_elements(GST_BIN(rec));
+    GValue item = G_VALUE_INIT;
+    while (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+        GstElement* e = GST_ELEMENT(g_value_get_object(&item));
+        GstState es, ep;
+        gst_element_get_state(e, &es, &ep, 0);
+        g_printerr("[RECORDER]   %s: %s (pending: %s)\n",
+            GST_ELEMENT_NAME(e),
+            gst_element_state_get_name(es),
+            gst_element_state_get_name(ep));
+        g_value_reset(&item);
+    }
+    gst_iterator_free(it);
+    return G_SOURCE_REMOVE;
+}, recorder);
+
     }
 
 	// 5. Optional: Create metadata extraction pipeline
-	if (extract_metadata) {
+/*	if (extract_metadata) {
 		GstElement* metadata = tracker.create_metadata_pipeline(
 			G_CALLBACK(metadata_callback), 
 			nullptr
@@ -334,62 +361,20 @@ int main(int argc, char* argv[])
 			return -1;
 		}
 		tracker.add_pipeline("metadata", metadata);
-    }
+    } */
 
     // Create main loop before starting pipelines and registering bus watches.
     GMainLoop* loop = g_main_loop_new(NULL, FALSE);
     g_main_loop = loop;
 
-    // Determine output pipeline name for bus watch.
-    const char* output_pipe_name = headless ? "headless" : "display";
-    GstElement* output_pipe = tracker.get_pipeline(output_pipe_name);
-    if (!output_pipe) {
-        g_printerr("[FATAL] Could not find output pipeline '%s'\n", output_pipe_name);
-        g_main_loop_unref(loop);
-        tracker.stop_all();
-        return -1;
-    }
-
-    // Shared bus callback — quits loop on EOS or Error.
-    auto bus_callback = [](GstBus* bus, GstMessage* msg, gpointer data) -> gboolean {
-        GMainLoop* loop = (GMainLoop*)data;
-        switch (GST_MESSAGE_TYPE(msg)) {
-            case GST_MESSAGE_EOS:
-                g_print("\n[BUS] End-Of-Stream — video processed successfully\n");
-                g_main_loop_quit(loop);
-                break;
-            case GST_MESSAGE_ERROR: {
-                GError* err;
-                gchar* debug_info;
-                gst_message_parse_error(msg, &err, &debug_info);
-                g_printerr("\n[BUS] Error from %s: %s\n",
-                           GST_OBJECT_NAME(msg->src), err->message);
-                g_printerr("[BUS] Debug info: %s\n", debug_info ? debug_info : "none");
-                g_clear_error(&err);
-                g_free(debug_info);
-                g_main_loop_quit(loop);
-                break;
-            }
-            case GST_MESSAGE_WARNING: {
-                GError* err;
-                gchar* debug_info;
-                gst_message_parse_warning(msg, &err, &debug_info);
-                g_printerr("[BUS] Warning from %s: %s\n",
-                           GST_OBJECT_NAME(msg->src), err->message);
-                g_clear_error(&err);
-                g_free(debug_info);
-                break;
-            }
-            default:
-                break;
-        }
-        return TRUE;
-    };
-
-    // Watch the output pipeline bus.
-    GstBus* output_bus = gst_element_get_bus(output_pipe);
-    gst_bus_add_watch(output_bus, (GstBusFunc)bus_callback, loop);
-    gst_object_unref(output_bus);
+	// Determine output pipeline name for bus watch.
+    if (!tracker.has_any_output()) {
+		g_printerr("[FATAL] No output pipeline registered\n");
+		g_main_loop_unref(loop);
+		tracker.stop_all();
+		return -1;
+	}
+	tracker.watch_all_outputs((GstBusFunc)bus_callback, loop);
 
     // FIX #2: Register input bus watch BEFORE start_all() to avoid the race
     // where EOS is posted before the watch is installed (e.g. very short videos).
@@ -436,6 +421,23 @@ int main(int argc, char* argv[])
 	// Start all pipelines AFTER bus watches and probes are registered.
 	std::cout << "Starting pipelines...\n";
     tracker.start_all();
+    
+    g_timeout_add(1000, [](gpointer data) -> gboolean {
+    GstElement* proc = static_cast<InterpipeTracker*>(data)->get_pipeline("processing");
+    if (proc) {
+        GstElement* isink = gst_bin_get_by_name(GST_BIN(proc), "processing_output");
+        if (isink) {
+            guint n = 0;
+            g_object_get(isink, "num-listeners", &n, NULL);
+            g_printerr("[INTERPIPE] processing_output num-listeners: %u\n", n);
+            gst_object_unref(isink);
+        }
+    }
+    return G_SOURCE_REMOVE;
+}, &tracker);
+    
+	// Start processing immediately
+	//tracker.start_pipeline("processing");
 
     // FIX #2 (cont.): Removed g_usleep(2000000) here — it served no purpose
     // and introduced a race condition where EOS from a short video could arrive

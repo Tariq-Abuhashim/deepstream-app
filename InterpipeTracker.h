@@ -32,6 +32,7 @@
 
 class InterpipeTracker {
 private:
+	static const std::set<std::string> OUTPUT_NAMES;
 	std::map<std::string, GstElement*> pipelines;
 	std::string current_source;
     int infer_width  = 800;
@@ -204,7 +205,9 @@ public:
         GstElement* tracker = gst_element_factory_make("nvtracker",      "tracker");
         GstElement* conv    = gst_element_factory_make("nvvideoconvert", "nvvidconv");
         GstElement* queue   = gst_element_factory_make("queue",          "queue");
-        GstElement* sink    = gst_element_factory_make("interpipesink",  "processing_output");
+		GstElement* tee     = gst_element_factory_make("tee",          "tee");
+		GstElement* sink    = gst_element_factory_make("interpipesink","processing_output");
+		GstElement* sink2   = gst_element_factory_make("interpipesink","processing_record");
         
         if (!src || !mux || !pgie || !tracker || !conv || !queue || !sink) {
             g_printerr("Failed to create one or more processing pipeline elements\n");
@@ -212,7 +215,7 @@ public:
             return nullptr;
         }
 
-        gst_bin_add_many(GST_BIN(pipeline), src, mux, pgie, tracker, queue, sink, NULL);
+        gst_bin_add_many(GST_BIN(pipeline), src, mux, pgie, tracker, conv, queue, tee, sink, sink2, NULL);
         
         // FIX #3: Set explicit caps on interpipesrc so it matches the emitter
         // exactly. Without this, interpipesrc may silently drop buffers if caps
@@ -270,11 +273,18 @@ public:
             NULL);
         
         // forward-eos=TRUE: propagate EOS to all listener pipelines when source ends.
-        g_object_set(G_OBJECT(sink),
+/*        g_object_set(G_OBJECT(sink),
             "sync",        FALSE,
             "async",       FALSE,
             "forward-eos", TRUE,
-            NULL);
+            NULL); */
+        for (GstElement* s : {sink, sink2}) {
+			g_object_set(G_OBJECT(s),
+				"sync",        FALSE,
+				"async",       FALSE,
+				"forward-eos", TRUE,
+				NULL);
+		}
         
         // interpipesrc has a STATIC src pad — link directly to nvstreammux.
         // The input pipeline already emits NvBufSurface-backed NVMM buffers
@@ -313,11 +323,23 @@ public:
         gst_object_unref(src_pad);
         gst_object_unref(mux_sink_pad);
 
-        if (!gst_element_link_many(mux, pgie, tracker, queue, sink, NULL)) {
-            g_printerr("Failed to link mux -> pgie -> tracker -> queue -> sink\n");
-            gst_object_unref(pipeline);
-            return nullptr;
-        }
+		// link up to tee
+		if (!gst_element_link_many(mux, pgie, tracker, conv, queue, tee, NULL)) {
+			g_printerr("Failed to link mux → ... → tee\n");
+			gst_object_unref(pipeline); return nullptr;
+		}
+
+		// link tee → sink and tee → sink2 via request pads
+		auto link_tee = [&](GstElement* s) {
+			GstPad* tee_src  = gst_element_get_request_pad(tee, "src_%u");
+			GstPad* sink_pad = gst_element_get_static_pad(s, "sink");
+			if (gst_pad_link(tee_src, sink_pad) != GST_PAD_LINK_OK)
+				g_printerr("Failed to link tee → %s\n", GST_ELEMENT_NAME(s));
+			gst_object_unref(tee_src);
+			gst_object_unref(sink_pad);
+		};
+		link_tee(sink);
+		link_tee(sink2);
         
 		current_source = initial_source;
 		g_print("Created processing pipeline: %s → processing_output\n", initial_source.c_str());
@@ -326,24 +348,25 @@ public:
 		return pipeline;
 	}
 	
-    GstElement* create_display_pipeline(bool sync = false) {
-    	std::string pipe_desc = 
-            "interpipesrc name=src listen-to=processing_output"
-            " is-live=true stream-sync=0 allow-renegotiation=true ! "
-			"nvvideoconvert ! "
-        	"video/x-raw(memory:NVMM),format=RGBA ! "
-            "nvdsosd name=osd ! "
-            "nveglglessink name=sink sync=" + std::string(sync ? "true" : "false") +
-            " async=false";
-    	GstElement* pipeline = create_pipeline(pipe_desc);
-        if (pipeline) g_print("Created display pipeline: processing_output → screen\n");
-        return pipeline;
-    }
+GstElement* create_display_pipeline(bool sync = false) {
+    std::string pipe_desc = 
+        "interpipesrc name=src listen-to=processing_output"
+        " is-live=true stream-sync=0 allow-renegotiation=true ! "
+        "nvvideoconvert ! "
+        "video/x-raw(memory:NVMM),format=RGBA ! "
+        "queue max-size-buffers=2 leaky=2 ! "
+        "nvdsosd name=osd ! "
+        "nvvideoconvert ! "
+        "autovideosink name=sink sync=false async=false";
+    GstElement* pipeline = create_pipeline(pipe_desc);
+    if (pipeline) g_print("Created display pipeline: processing_output → screen\n");
+    return pipeline;
+}
 
     GstElement* create_headless_pipeline() {
         std::string pipe_desc = 
             "interpipesrc name=src listen-to=processing_output"
-            " is-live=true stream-sync=0 allow-renegotiation=true ! "
+			" is-live=true stream-sync=0 allow-renegotiation=true ! "
 			"nvvideoconvert ! "
         	"video/x-raw(memory:NVMM),format=RGBA ! "
             "fakesink name=sink sync=false async=false";
@@ -352,20 +375,21 @@ public:
         return pipeline;
     }
 
-    GstElement* create_recorder_pipeline(const std::string& output_file,
-                                         int bitrate = 8000000) {
-        std::string pipe_desc = 
-            "interpipesrc name=src listen-to=processing_output"
-            " is-live=true stream-sync=0 allow-renegotiation=true ! "
-            "nvvideoconvert ! "
-            "nvv4l2h264enc name=encoder bitrate=" + std::to_string(bitrate) + " ! "
-            "h264parse ! mp4mux ! "
-            "filesink location=" + output_file + " sync=false";
-        GstElement* pipeline = create_pipeline(pipe_desc);
-        if (pipeline)
-            g_print("Created recorder pipeline: processing_output → %s\n", output_file.c_str());
-        return pipeline;
-    }
+GstElement* create_recorder_pipeline(const std::string& output_file,
+                                     int bitrate = 8000000) {
+std::string pipe_desc = 
+    "interpipesrc name=src listen-to=processing_record"
+    " is-live=true stream-sync=0 allow-renegotiation=true ! "
+    "nvvideoconvert ! "
+    "nvv4l2h264enc name=encoder bitrate=" + std::to_string(bitrate) + " ! "
+    "h264parse ! matroskamux streamable=true ! "
+    "filesink location=" + output_file + " sync=false async=false";
+
+    GstElement* pipeline = create_pipeline(pipe_desc);
+    if (pipeline)
+        g_print("Created recorder pipeline: processing_output → %s\n", output_file.c_str());
+    return pipeline;
+}
     
     GstElement* create_metadata_pipeline(GCallback callback, gpointer user_data) {
     	std::string pipe_desc = 
@@ -426,7 +450,7 @@ public:
 		// already listening before the input pipeline begins emitting frames.
 		// Then start input last.
 		const std::vector<std::string> order = {
-		    "processing", "display", "headless", "recorder", "metadata", "input"
+			"processing", "recorder", "display", "headless", "metadata", "input"
 		};
 		for (const auto& name : order) {
 		    auto it = pipelines.find(name);
@@ -482,6 +506,22 @@ public:
     	pipelines.clear();
 		g_print("All pipelines stopped and cleaned up\n");
     }
+    
+    void watch_all_outputs(GstBusFunc callback, gpointer user_data) {
+		for (auto& [name, pipeline] : pipelines) {
+		    if (!OUTPUT_NAMES.count(name)) continue;
+		    GstBus* bus = gst_element_get_bus(pipeline);
+		    gst_bus_add_watch(bus, callback, user_data);
+		    gst_object_unref(bus);
+		    g_print("Watching bus for pipeline: %s\n", name.c_str());
+		}
+	}
+	
+	bool has_any_output() const {
+		for (const auto& name : OUTPUT_NAMES)
+		    if (pipelines.count(name)) return true;
+		return false;
+	}
 
 	void print_status() {
 		g_print("\n=== InterpipeTracker Status ===\n");

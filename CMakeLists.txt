@@ -171,7 +171,7 @@ target_link_libraries(deepstream-track
     Eigen3::Eigen
 )
 
-# DeepStream-only app
+# DeepStream-only app with interpipe
 add_executable(deepstream-interpipe-track track_interpipe.cpp)
 target_link_libraries(deepstream-interpipe-track
     # DeepStream libraries first

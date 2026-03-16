@@ -150,14 +150,22 @@ extern "C" bool NvDsInferParseCustomDETR(
     return true;
 }
 
+/* Called by nvinfer when custom parser .so is loaded.
+*/
 extern "C" bool NvDsInferInitialize(void *handle) {
     return true;
 }
 
+/* Called when DeepStream unloads .so or shuts down the pipeline.
+*/
 extern "C" void NvDsInferDeInitialize(void *handle) {
     // No-op
 }
 
+/* Called by nvinfer only if the user did NOT override thresholds in the config file.
+ 	num-detected-classes=3
+ 	pre-cluster-threshold=0.3;0.25;0.4
+*/
 extern "C" NvDsInferParseDetectionParams NvDsInferGetDefaultParseDetectionParams() {
     int num_classes = 3;  // Adjust to your actual number of classes
     NvDsInferParseDetectionParams params;

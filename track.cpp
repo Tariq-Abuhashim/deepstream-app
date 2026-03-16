@@ -387,11 +387,10 @@ int main(int argc, char *argv[]) {
                          osd_sink_pad_buffer_probe, NULL, NULL);
         gst_object_unref(osd_sink_pad);
 */
-/*        GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
+        GstPad *tracker_src_pad = gst_element_get_static_pad(tracker, "src");
 		gst_pad_add_probe(tracker_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
 		              print_meta_probe, (gpointer)"nvtracker", NULL);
 		gst_object_unref(tracker_src_pad);
-*/
     }
     
     // Display filtering probe (modifies visualization)
