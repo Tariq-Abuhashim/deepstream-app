@@ -329,17 +329,27 @@ public:
 			gst_object_unref(pipeline); return nullptr;
 		}
 
-		// link tee → sink and tee → sink2 via request pads
-		auto link_tee = [&](GstElement* s) {
+		GstElement* q1   = gst_element_factory_make("queue", "q_output");
+		GstElement* q2   = gst_element_factory_make("queue", "q_record");
+		gst_bin_add_many(GST_BIN(pipeline), q1, q2, NULL);
+
+		g_object_set(q1, "leaky", 2, "max-size-buffers", 10,
+				     "max-size-bytes", 0, "max-size-time", 0, NULL);
+		g_object_set(q2, "leaky", 2, "max-size-buffers", 10,
+				     "max-size-bytes", 0, "max-size-time", 0, NULL);
+
+		auto link_tee = [&](GstElement* q, GstElement* s) {
 			GstPad* tee_src  = gst_element_get_request_pad(tee, "src_%u");
-			GstPad* sink_pad = gst_element_get_static_pad(s, "sink");
-			if (gst_pad_link(tee_src, sink_pad) != GST_PAD_LINK_OK)
-				g_printerr("Failed to link tee → %s\n", GST_ELEMENT_NAME(s));
+			GstPad* q_sink   = gst_element_get_static_pad(q, "sink");
+			if (gst_pad_link(tee_src, q_sink) != GST_PAD_LINK_OK)
+				g_printerr("Failed to link tee → queue\n");
 			gst_object_unref(tee_src);
-			gst_object_unref(sink_pad);
+			gst_object_unref(q_sink);
+			if (!gst_element_link(q, s))
+				g_printerr("Failed to link queue → %s\n", GST_ELEMENT_NAME(s));
 		};
-		link_tee(sink);
-		link_tee(sink2);
+		link_tee(q1, sink);
+		link_tee(q2, sink2);
         
 		current_source = initial_source;
 		g_print("Created processing pipeline: %s → processing_output\n", initial_source.c_str());
